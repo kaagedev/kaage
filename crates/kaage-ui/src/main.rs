@@ -18,6 +18,8 @@ use theme::{
 };
 use wm::{BeWindowManager, PaneKind};
 
+const WALLPAPER_BYTES: &[u8] = include_bytes!("../../../assets/kaage-wallpaper.jpg");
+
 struct ToastNotice {
     ok: bool,
     text: String,
@@ -28,6 +30,7 @@ struct KaageApp {
     ws_tx: WsSender,
     ws_rx: WsReceiver,
     connected: bool,
+    wallpaper: Option<egui::TextureHandle>,
     wm: BeWindowManager,
     deskbar: BeDeskbar,
     nixos: Option<NixosInfo>,
@@ -39,9 +42,23 @@ struct KaageApp {
     toast: Option<ToastNotice>,
 }
 
+fn load_wallpaper_texture(ctx: &egui::Context) -> Option<egui::TextureHandle> {
+    let img = image::load_from_memory_with_format(WALLPAPER_BYTES, image::ImageFormat::Jpeg)
+        .ok()?
+        .to_rgba8();
+    let size = [img.width() as usize, img.height() as usize];
+    let color_image = egui::ColorImage::from_rgba_unmultiplied(size, img.as_raw());
+    Some(ctx.load_texture(
+        "kaage_wallpaper",
+        color_image,
+        egui::TextureOptions::LINEAR,
+    ))
+}
+
 impl KaageApp {
     fn new(cc: &eframe::CreationContext<'_>, ws_url: &str) -> Self {
         apply_beos_style(&cc.egui_ctx);
+        let wallpaper = load_wallpaper_texture(&cc.egui_ctx);
 
         let ctx_clone = cc.egui_ctx.clone();
         let (ws_tx, ws_rx) = ewebsock::connect_with_wakeup(
@@ -75,6 +92,7 @@ impl KaageApp {
             ws_tx,
             ws_rx,
             connected: false,
+            wallpaper,
             wm,
             deskbar: BeDeskbar::new(),
             nixos: None,
@@ -196,7 +214,32 @@ impl eframe::App for KaageApp {
 
         egui::CentralPanel::default()
             .frame(egui::Frame::NONE.fill(BEOS_DESKTOP_BLUE))
-            .show(ui, |_ui| {});
+            .show(ui, |ui| {
+                if let Some(tex) = &self.wallpaper {
+                    let rect = ui.max_rect();
+                    let tex_size = tex.size_vec2();
+                    if rect.width() > 0.0
+                        && rect.height() > 0.0
+                        && tex_size.x > 0.0
+                        && tex_size.y > 0.0
+                    {
+                        let view_aspect = rect.width() / rect.height();
+                        let tex_aspect = tex_size.x / tex_size.y;
+                        let uv = if view_aspect > tex_aspect {
+                            let h = tex_aspect / view_aspect;
+                            Rect::from_min_max(
+                                Pos2::new(0.0, (1.0 - h) * 0.5),
+                                Pos2::new(1.0, (1.0 + h) * 0.5),
+                            )
+                        } else {
+                            let w = view_aspect / tex_aspect;
+                            let x_min = (1.0 - w) * 0.72;
+                            Rect::from_min_max(Pos2::new(x_min, 0.0), Pos2::new(x_min + w, 1.0))
+                        };
+                        ui.painter().image(tex.id(), rect, uv, Color32::WHITE);
+                    }
+                }
+            });
 
         let mut outbound = Vec::new();
         let spawn_reqs = self.wm.show(
