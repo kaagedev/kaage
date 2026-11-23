@@ -163,7 +163,7 @@ in
 
     security.polkit = lib.mkIf cfg.allowSystemdControl {
       enable = true;
-      extraRules = ''
+      extraConfig = ''
         polkit.addRule(function(action, subject) {
           if (action.id == "org.freedesktop.systemd1.manage-units" &&
               subject.user == "${cfg.user}") {

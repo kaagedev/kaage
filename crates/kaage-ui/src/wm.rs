@@ -1,16 +1,18 @@
 use crate::inspectors::{
-    InspectorSpawnRequest, ScopeFilter, render_docker_inspector, render_systemd_inspector,
+    InspectorSpawnRequest, ScopeFilter, StateFilter, render_docker_inspector,
+    render_systemd_inspector,
 };
 use crate::terminal::TerminalPane;
 use crate::theme::{BEOS_PANEL_GRAY, BEOS_TAB_INACTIVE, BEOS_TAB_YELLOW, draw_beos_bevel};
 use egui::{Color32, CornerRadius, Id, Pos2, Rect, Sense, Vec2};
-use kaage_proto::{ClientMsg, ContainerInfo, SystemdUnitInfo};
+use kaage_proto::{ClientMsg, ContainerInfo, NixosInfo, SystemdUnitInfo, SystemdUnitStatus};
 
 pub enum PaneKind {
     Terminal(TerminalPane),
     SystemdInspector {
         filter: String,
         scope_filter: ScopeFilter,
+        state_filter: StateFilter,
     },
     DockerInspector {
         filter: String,
@@ -80,7 +82,9 @@ impl BeWindowManager {
     pub fn show(
         &mut self,
         ctx: &egui::Context,
+        nixos: Option<&NixosInfo>,
         units: &[SystemdUnitInfo],
+        selected_unit_status: &mut Option<SystemdUnitStatus>,
         containers: &[ContainerInfo],
         send_msg: &mut dyn FnMut(ClientMsg),
     ) -> Vec<InspectorSpawnRequest> {
@@ -217,12 +221,16 @@ impl BeWindowManager {
                                 PaneKind::SystemdInspector {
                                     filter,
                                     scope_filter,
+                                    state_filter,
                                 } => {
                                     if let Some(req) = render_systemd_inspector(
                                         &mut child_ui,
                                         filter,
                                         scope_filter,
+                                        state_filter,
+                                        nixos,
                                         units,
+                                        selected_unit_status,
                                         send_msg,
                                     ) {
                                         spawn_requests.push(req);

@@ -95,7 +95,13 @@ let
         --out-name kaage-ui \
         --no-typescript \
         target/wasm32-unknown-unknown/release/kaage-ui.wasm
-      wasm-opt -Oz --all-features -o "$out/kaage-ui_bg.opt.wasm" "$out/kaage-ui_bg.wasm"
+      wasm-opt -Oz \
+        --enable-bulk-memory \
+        --enable-nontrapping-float-to-int \
+        --enable-sign-ext \
+        --enable-mutable-globals \
+        --enable-reference-types \
+        -o "$out/kaage-ui_bg.opt.wasm" "$out/kaage-ui_bg.wasm"
       mv "$out/kaage-ui_bg.opt.wasm" "$out/kaage-ui_bg.wasm"
       sed 's|<link data-trunk[^>]*>|<script type="module">import init from "./kaage-ui.js"; init();</script>|' \
         index.html > "$out/index.html"

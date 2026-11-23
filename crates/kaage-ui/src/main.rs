@@ -7,8 +7,10 @@ mod wm;
 use deskbar::{BeDeskbar, DeskbarAction};
 use eframe::egui::{self, Color32, CornerRadius, Id, Pos2, Rect, Vec2};
 use ewebsock::{WsEvent, WsMessage, WsReceiver, WsSender};
-use inspectors::{InspectorSpawnRequest, ScopeFilter};
-use kaage_proto::{ClientMsg, ContainerInfo, HostMetrics, ServerMsg, SystemdUnitInfo};
+use inspectors::{InspectorSpawnRequest, ScopeFilter, StateFilter};
+use kaage_proto::{
+    ClientMsg, ContainerInfo, HostMetrics, NixosInfo, ServerMsg, SystemdUnitInfo, SystemdUnitStatus,
+};
 use terminal::TerminalPane;
 use theme::{
     BEOS_DESKTOP_BLUE, BEOS_PANEL_GRAY, BEOS_STATUS_GREEN, BEOS_STATUS_RED, apply_beos_style,
@@ -28,8 +30,10 @@ struct KaageApp {
     connected: bool,
     wm: BeWindowManager,
     deskbar: BeDeskbar,
+    nixos: Option<NixosInfo>,
     metrics: Option<HostMetrics>,
     units: Vec<SystemdUnitInfo>,
+    selected_unit_status: Option<SystemdUnitStatus>,
     containers: Vec<ContainerInfo>,
     next_pty_id: u32,
     toast: Option<ToastNotice>,
@@ -53,17 +57,18 @@ impl KaageApp {
             PaneKind::SystemdInspector {
                 filter: String::new(),
                 scope_filter: ScopeFilter::All,
+                state_filter: StateFilter::All,
             },
             Pos2::new(24.0, 24.0),
-            Vec2::new(580.0, 340.0),
+            Vec2::new(680.0, 420.0),
         );
 
         let initial_pty = 1;
         wm.open_window(
             "Terminal — shell".into(),
             PaneKind::Terminal(TerminalPane::new(initial_pty, 80, 24)),
-            Pos2::new(60.0, 395.0),
-            Vec2::new(680.0, 410.0),
+            Pos2::new(60.0, 465.0),
+            Vec2::new(680.0, 360.0),
         );
 
         Self {
@@ -72,8 +77,10 @@ impl KaageApp {
             connected: false,
             wm,
             deskbar: BeDeskbar::new(),
+            nixos: None,
             metrics: None,
             units: Vec::new(),
+            selected_unit_status: None,
             containers: Vec::new(),
             next_pty_id: 2,
             toast: None,
@@ -142,8 +149,10 @@ impl eframe::App for KaageApp {
                 WsEvent::Message(WsMessage::Binary(bytes)) => {
                     if let Ok(server_msg) = postcard::from_bytes::<ServerMsg>(&bytes) {
                         match server_msg {
+                            ServerMsg::NixosInfo(info) => self.nixos = Some(info),
                             ServerMsg::Metrics(m) => self.metrics = Some(m),
                             ServerMsg::UnitsSnapshot(u) => self.units = u,
+                            ServerMsg::UnitStatus(st) => self.selected_unit_status = Some(st),
                             ServerMsg::ContainersSnapshot(c) => self.containers = c,
                             ServerMsg::PtyOutput { session_id, data } => {
                                 for group in &mut self.wm.groups {
@@ -190,9 +199,16 @@ impl eframe::App for KaageApp {
             .show(ui, |_ui| {});
 
         let mut outbound = Vec::new();
-        let spawn_reqs = self.wm.show(&ctx, &self.units, &self.containers, &mut |msg| {
-            outbound.push(msg);
-        });
+        let spawn_reqs = self.wm.show(
+            &ctx,
+            self.nixos.as_ref(),
+            &self.units,
+            &mut self.selected_unit_status,
+            &self.containers,
+            &mut |msg| {
+                outbound.push(msg);
+            },
+        );
         for msg in outbound {
             self.send_client_msg(msg);
         }
@@ -219,9 +235,10 @@ impl eframe::App for KaageApp {
                         PaneKind::SystemdInspector {
                             filter: String::new(),
                             scope_filter: ScopeFilter::All,
+                            state_filter: StateFilter::All,
                         },
                         Pos2::new(48.0, 48.0),
-                        Vec2::new(580.0, 340.0),
+                        Vec2::new(680.0, 420.0),
                     );
                     self.send_client_msg(ClientMsg::ListUnits);
                 }
@@ -308,14 +325,23 @@ fn main() {
         .unwrap();
 
     wasm_bindgen_futures::spawn_local(async move {
-        eframe::WebRunner::new()
+        let start_result = eframe::WebRunner::new()
             .start(
                 canvas,
                 eframe::WebOptions::default(),
                 Box::new(move |cc| Ok(Box::new(KaageApp::new(cc, &ws_url)))),
             )
-            .await
-            .expect("Failed to start eframe WebRunner");
+            .await;
+
+        if let Err(err) = start_result {
+            web_sys::console::error_1(&err);
+            if let Some(el) = document.get_element_by_id("kaage_error") {
+                let _ = el.set_attribute("style", "display: block;");
+                el.set_text_content(Some(&format!(
+                    "kaage failed to initialize WebGL2 renderer:\n{err:?}"
+                )));
+            }
+        }
     });
 }
 

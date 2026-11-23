@@ -24,13 +24,47 @@ pub enum ContainerAction {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NixosInfo {
+    pub is_nixos: bool,
+    pub pretty_name: String,
+    pub version: String,
+    pub current_system: Option<String>,
+    pub generation: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SystemdUnitInfo {
     pub name: String,
     pub description: String,
     pub load_state: String,
     pub active_state: String,
     pub sub_state: String,
+    pub unit_file_state: String,
+    pub enabled: bool,
+    pub running: bool,
+    pub nixos_managed: bool,
     pub scope: UnitScope,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SystemdUnitStatus {
+    pub name: String,
+    pub scope: UnitScope,
+    pub description: String,
+    pub load_state: String,
+    pub active_state: String,
+    pub sub_state: String,
+    pub unit_file_state: String,
+    pub enabled: bool,
+    pub running: bool,
+    pub fragment_path: String,
+    pub nix_store_path: Option<String>,
+    pub nixos_managed: bool,
+    pub main_pid: u32,
+    pub memory_current: Option<u64>,
+    pub active_enter_timestamp_usec: u64,
+    pub result: String,
+    pub status_text: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -54,6 +88,10 @@ pub struct HostMetrics {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ClientMsg {
     ListUnits,
+    GetUnitStatus {
+        unit: String,
+        scope: UnitScope,
+    },
     ControlUnit {
         unit: String,
         scope: UnitScope,
@@ -86,8 +124,10 @@ pub enum ClientMsg {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum ServerMsg {
+    NixosInfo(NixosInfo),
     Metrics(HostMetrics),
     UnitsSnapshot(Vec<SystemdUnitInfo>),
+    UnitStatus(SystemdUnitStatus),
     ContainersSnapshot(Vec<ContainerInfo>),
     ActionFeedback {
         target: String,
@@ -111,6 +151,10 @@ mod tests {
     fn client_msg_roundtrip() {
         let messages = vec![
             ClientMsg::ListUnits,
+            ClientMsg::GetUnitStatus {
+                unit: "kaaged.service".into(),
+                scope: UnitScope::System,
+            },
             ClientMsg::ControlUnit {
                 unit: "tailscaled.service".into(),
                 scope: UnitScope::System,
@@ -154,6 +198,13 @@ mod tests {
     #[test]
     fn server_msg_roundtrip() {
         let messages = vec![
+            ServerMsg::NixosInfo(NixosInfo {
+                is_nixos: true,
+                pretty_name: "NixOS 26.11 (Zokor)".into(),
+                version: "26.11 (Zokor)".into(),
+                current_system: Some("/nix/store/abc-nixos-system-aihole".into()),
+                generation: Some(42),
+            }),
             ServerMsg::Metrics(HostMetrics {
                 hostname: "aihole".into(),
                 cpu_percent: 42.5,
@@ -167,8 +218,31 @@ mod tests {
                 load_state: "loaded".into(),
                 active_state: "active".into(),
                 sub_state: "running".into(),
+                unit_file_state: "enabled".into(),
+                enabled: true,
+                running: true,
+                nixos_managed: true,
                 scope: UnitScope::User,
             }]),
+            ServerMsg::UnitStatus(SystemdUnitStatus {
+                name: "kaaged.service".into(),
+                scope: UnitScope::System,
+                description: "kaage daemon".into(),
+                load_state: "loaded".into(),
+                active_state: "active".into(),
+                sub_state: "running".into(),
+                unit_file_state: "enabled".into(),
+                enabled: true,
+                running: true,
+                fragment_path: "/etc/systemd/system/kaaged.service".into(),
+                nix_store_path: Some("/nix/store/xyz-unit-kaaged.service/kaaged.service".into()),
+                nixos_managed: true,
+                main_pid: 1234,
+                memory_current: Some(4_194_304),
+                active_enter_timestamp_usec: 1_700_000_000_000_000,
+                result: "success".into(),
+                status_text: "● kaaged.service - kaage daemon".into(),
+            }),
             ServerMsg::ContainersSnapshot(vec![ContainerInfo {
                 id: "1234567890ab".into(),
                 name: "postgres".into(),
