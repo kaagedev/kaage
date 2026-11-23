@@ -2,6 +2,8 @@
 
 A single-user, BeOS-inspired browser desktop environment built in Rust for inspecting and controlling a Linux host's systemd services (system + user), containers, live host metrics, and interactive PTY terminals over Tailscale.
 
+![kaage BeOS-inspired webtop desktop](assets/kaage-screenshot.png)
+
 ## Workspace Layout
 
 - [`crates/kaage-proto`](crates/kaage-proto) — Shared `postcard` wire protocol (`ClientMsg`, `ServerMsg`, `SystemdUnitInfo`, `ContainerInfo`, `HostMetrics`).
