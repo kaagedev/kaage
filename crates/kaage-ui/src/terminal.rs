@@ -72,12 +72,34 @@ impl TerminalPane {
                                 match key {
                                     Key::Enter => outbound.push(b'\r'),
                                     Key::Backspace => outbound.push(0x7f),
-                                    Key::Tab => outbound.push(b'\t'),
+                                    Key::Tab => {
+                                        if modifiers.shift {
+                                            outbound.extend_from_slice(b"\x1b[Z");
+                                        } else {
+                                            outbound.push(b'\t');
+                                        }
+                                    }
                                     Key::Escape => outbound.push(0x1b),
-                                    Key::ArrowUp => outbound.extend_from_slice(b"\x1b[A"),
-                                    Key::ArrowDown => outbound.extend_from_slice(b"\x1b[B"),
-                                    Key::ArrowRight => outbound.extend_from_slice(b"\x1b[C"),
-                                    Key::ArrowLeft => outbound.extend_from_slice(b"\x1b[D"),
+                                    Key::ArrowUp => outbound.extend_from_slice(if modifiers.alt {
+                                        b"\x1b[1;3A".as_slice()
+                                    } else {
+                                        b"\x1b[A".as_slice()
+                                    }),
+                                    Key::ArrowDown => outbound.extend_from_slice(if modifiers.alt {
+                                        b"\x1b[1;3B".as_slice()
+                                    } else {
+                                        b"\x1b[B".as_slice()
+                                    }),
+                                    Key::ArrowRight => outbound.extend_from_slice(if modifiers.alt {
+                                        b"\x1b[1;3C".as_slice()
+                                    } else {
+                                        b"\x1b[C".as_slice()
+                                    }),
+                                    Key::ArrowLeft => outbound.extend_from_slice(if modifiers.alt {
+                                        b"\x1b[1;3D".as_slice()
+                                    } else {
+                                        b"\x1b[D".as_slice()
+                                    }),
                                     Key::Home => outbound.extend_from_slice(b"\x1b[H"),
                                     Key::End => outbound.extend_from_slice(b"\x1b[F"),
                                     Key::Delete => outbound.extend_from_slice(b"\x1b[3~"),

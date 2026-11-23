@@ -23,6 +23,7 @@ pub enum TrackerAction {
     },
     OpenContainers,
     OpenSystemMonitor,
+    OpenBottom,
     OpenAiJobs,
     OpenHttpPorts,
     OpenTailscale,
@@ -266,6 +267,9 @@ impl BeTrackerSidebar {
                         section_head(ui, "MONITORING & AI");
                         if tracker_row(ui, "GPU / CPU / Memory", Some(gpu_count), false) {
                             action = Some(TrackerAction::OpenSystemMonitor);
+                        }
+                        if tracker_row(ui, "Bottom (btm)", None, false) {
+                            action = Some(TrackerAction::OpenBottom);
                         }
                         if tracker_row(ui, "ComfyUI & Unsloth", Some(ai_active), false) {
                             action = Some(TrackerAction::OpenAiJobs);

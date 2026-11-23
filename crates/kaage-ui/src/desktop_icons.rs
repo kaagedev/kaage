@@ -6,6 +6,7 @@ use egui::{Color32, CornerRadius, Id, Pos2, Rect, Sense, Stroke, Vec2};
 pub enum DesktopIconAction {
     OpenHostServices,
     OpenSystemMonitor,
+    OpenBottom,
     OpenAiJobs,
     OpenHttpPorts,
     OpenTailscale,
@@ -30,6 +31,7 @@ pub fn show_desktop_icons(ctx: &egui::Context) -> Option<DesktopIconAction> {
             let items = [
                 ("Services", IconKind::Folder, DesktopIconAction::OpenHostServices),
                 ("Monitor", IconKind::Disk, DesktopIconAction::OpenSystemMonitor),
+                ("Bottom", IconKind::Terminal, DesktopIconAction::OpenBottom),
                 ("AI Jobs", IconKind::Container, DesktopIconAction::OpenAiJobs),
                 ("HTTP Ports", IconKind::Log, DesktopIconAction::OpenHttpPorts),
                 ("Tailscale", IconKind::Disk, DesktopIconAction::OpenTailscale),

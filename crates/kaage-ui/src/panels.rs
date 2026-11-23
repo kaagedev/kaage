@@ -14,7 +14,9 @@ pub fn render_system_monitor(
     cpu_history: &[f32],
     mem_history: &[f32],
     send_msg: &mut dyn FnMut(ClientMsg),
-) {
+) -> Option<InspectorSpawnRequest> {
+    let mut spawn_req = None;
+
     ui.horizontal(|ui| {
         ui.label(
             RichText::new("Host Compute: GPU · CPU · Memory")
@@ -24,6 +26,17 @@ pub fn render_system_monitor(
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             if be_button(ui, "Refresh").clicked() {
                 send_msg(ClientMsg::RefreshDashboard);
+            }
+            if be_button(ui, "Open btm").clicked() {
+                spawn_req = Some(InspectorSpawnRequest::OpenCommandTab {
+                    title: "Bottom (btm)".into(),
+                    cmd: vec![
+                        "btm".into(),
+                        "--dot_marker".into(),
+                        "--color".into(),
+                        "gruvbox".into(),
+                    ],
+                });
             }
         });
     });
@@ -35,7 +48,7 @@ pub fn render_system_monitor(
                 .italics()
                 .color(Color32::from_rgb(70, 70, 70)),
         );
-        return;
+        return spawn_req;
     };
 
     ScrollArea::vertical()
@@ -264,6 +277,8 @@ pub fn render_system_monitor(
                 }
             });
         });
+
+    spawn_req
 }
 
 /// AI Jobs panel: ComfyUI running & pending queue + Unsloth Studio jobs & workers.

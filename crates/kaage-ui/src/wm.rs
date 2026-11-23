@@ -105,6 +105,19 @@ impl BeWindowManager {
         false
     }
 
+    pub fn focus_tab_by_title(&mut self, title: &str) -> bool {
+        for g_idx in 0..self.groups.len() {
+            for t_idx in 0..self.groups[g_idx].tabs.len() {
+                if self.groups[g_idx].tabs[t_idx].title == title {
+                    let gid = self.groups[g_idx].id;
+                    self.focus_tab(gid, t_idx);
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
     pub fn focus_tab(&mut self, group_id: u64, tab_idx: usize) {
         if let Some(pos) = self.groups.iter().position(|g| g.id == group_id) {
             let mut group = self.groups.remove(pos);
@@ -243,17 +256,41 @@ impl BeWindowManager {
                             draw_beos_bevel(painter, tab_rect, false);
                         }
 
-                        // BeOS Left Close Box
+                        // BeOS Left Close Box (non-overlapping hit rect so tab drag never swallows clicks)
                         let close_rect = Rect::from_min_size(
                             Pos2::new(tab_rect.min.x + 5.0, tab_rect.min.y + 5.0),
-                            Vec2::splat(11.0),
+                            Vec2::splat(12.0),
                         );
-                        draw_beos_bevel(ui.painter(), close_rect, false);
-                        let close_resp = ui.interact(
-                            close_rect,
-                            Id::unique(("be_close", group.id, tab.id)),
-                            Sense::click(),
-                        );
+                        let close_hit_rect = close_rect.expand(2.0);
+                        let close_resp = ui
+                            .interact(
+                                close_hit_rect,
+                                Id::unique(("be_close", group.id, tab.id)),
+                                Sense::click(),
+                            )
+                            .on_hover_text("Close");
+                        let close_pressed = close_resp.is_pointer_button_down_on();
+                        if close_resp.hovered() {
+                            ui.painter().rect_filled(
+                                close_rect,
+                                CornerRadius::ZERO,
+                                Color32::from_rgb(255, 224, 102),
+                            );
+                        }
+                        draw_beos_bevel(ui.painter(), close_rect, close_pressed);
+                        if close_resp.hovered() {
+                            let c = close_rect.center();
+                            let d = 2.5;
+                            let stroke = egui::Stroke::new(1.2, Color32::BLACK);
+                            ui.painter().line_segment(
+                                [Pos2::new(c.x - d, c.y - d), Pos2::new(c.x + d, c.y + d)],
+                                stroke,
+                            );
+                            ui.painter().line_segment(
+                                [Pos2::new(c.x + d, c.y - d), Pos2::new(c.x - d, c.y + d)],
+                                stroke,
+                            );
+                        }
                         if close_resp.clicked() {
                             close_req = Some((group.id, idx));
                         }
@@ -267,8 +304,12 @@ impl BeWindowManager {
                             Color32::BLACK,
                         );
 
+                        let tab_drag_rect = Rect::from_min_max(
+                            Pos2::new(close_hit_rect.max.x + 1.0, tab_rect.min.y),
+                            tab_rect.max,
+                        );
                         let tab_resp = ui.interact(
-                            tab_rect,
+                            tab_drag_rect,
                             Id::unique(("be_tab", group.id, tab.id)),
                             Sense::click_and_drag(),
                         );
@@ -362,13 +403,15 @@ impl BeWindowManager {
                                     }
                                 }
                                 PaneKind::SystemMonitor => {
-                                    render_system_monitor(
+                                    if let Some(req) = render_system_monitor(
                                         &mut child_ui,
                                         dashboard,
                                         cpu_history,
                                         mem_history,
                                         send_msg,
-                                    );
+                                    ) {
+                                        spawn_requests.push(req);
+                                    }
                                 }
                                 PaneKind::AiJobs => {
                                     if let Some(req) =

@@ -80,6 +80,7 @@
               pkgs.zig
               pkgs.pkg-config
               pkgs.rust-analyzer
+              pkgs.bottom
             ];
           };
         }
