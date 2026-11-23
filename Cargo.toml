@@ -1,0 +1,16 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/kaage-proto",
+    "crates/kaaged",
+    "crates/kaage-ui",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+
+[workspace.dependencies]
+serde = { version = "1.0", features = ["derive"] }
+postcard = { version = "1.1", features = ["alloc"] }

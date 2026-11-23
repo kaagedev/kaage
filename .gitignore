@@ -1,0 +1,8 @@
+/target
+/dist
+result
+result-*
+.direnv/
+.env
+*.swp
+.DS_Store
