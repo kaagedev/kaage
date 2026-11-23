@@ -23,7 +23,6 @@ let
       pkgs.bashInteractive
       pkgs.iproute2
       pkgs.tailscale
-      pkgs.bottom
     ]
     ++ cfg.extraPath
   );

@@ -1004,12 +1004,6 @@ fn resolve_command_binary(program: &str) -> String {
     {
         return cli;
     }
-    if program == "btm"
-        && let Ok(bin) = std::env::var("KAAGE_BTM_BIN")
-        && !bin.trim().is_empty()
-    {
-        return bin;
-    }
     program.to_string()
 }
 

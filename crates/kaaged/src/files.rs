@@ -400,17 +400,56 @@ pub fn build_preview(raw_path: &str) -> PreviewContent {
                 &bytes
             };
             match String::from_utf8(slice.to_vec()) {
-                Ok(content) => PreviewContent::Text {
-                    content,
-                    is_markdown: kind == FileKind::Markdown,
-                    truncated,
-                },
+                Ok(mut content) => {
+                    // Pretty-print compact JSON files for readability
+                    if !truncated
+                        && path
+                            .extension()
+                            .and_then(|e| e.to_str())
+                            .is_some_and(|e| e.eq_ignore_ascii_case("json"))
+                        && let Ok(val) = serde_json::from_str::<serde_json::Value>(&content)
+                        && let Ok(pretty) = serde_json::to_string_pretty(&val)
+                    {
+                        content = pretty;
+                    }
+                    PreviewContent::Text {
+                        content,
+                        is_markdown: kind == FileKind::Markdown,
+                        truncated,
+                    }
+                }
                 Err(_) => PreviewContent::Unsupported {
                     reason: "Binary file preview not available".into(),
                 },
             }
         }
         FileKind::Image => {
+            let ext = path
+                .extension()
+                .and_then(|e| e.to_str())
+                .unwrap_or("")
+                .to_ascii_lowercase();
+            // Render SVG as readable source text since egui image loader handles raster formats
+            if ext == "svg" {
+                return match fs::read_to_string(&path) {
+                    Ok(content) => {
+                        let truncated = content.len() > 256 * 1024;
+                        let text = if truncated {
+                            content.chars().take(256 * 1024).collect()
+                        } else {
+                            content
+                        };
+                        PreviewContent::Text {
+                            content: text,
+                            is_markdown: false,
+                            truncated,
+                        }
+                    }
+                    Err(_) => PreviewContent::Unsupported {
+                        reason: "Cannot read SVG".into(),
+                    },
+                };
+            }
             let Ok(bytes) = fs::read(&path) else {
                 return PreviewContent::Unsupported {
                     reason: "Cannot read image".into(),
@@ -421,17 +460,10 @@ pub fn build_preview(raw_path: &str) -> PreviewContent {
                     reason: "Image > 8 MB (download to view)".into(),
                 };
             }
-            let mime = match path
-                .extension()
-                .and_then(|e| e.to_str())
-                .unwrap_or("")
-                .to_ascii_lowercase()
-                .as_str()
-            {
+            let mime = match ext.as_str() {
                 "jpg" | "jpeg" => "image/jpeg",
                 "webp" => "image/webp",
                 "gif" => "image/gif",
-                "svg" => "image/svg+xml",
                 _ => "image/png",
             };
             PreviewContent::ImageBytes {
@@ -439,8 +471,14 @@ pub fn build_preview(raw_path: &str) -> PreviewContent {
                 bytes,
             }
         }
+        FileKind::Archive => preview_archive(&path),
         FileKind::ModelWeights => {
-            if path.extension().and_then(|e| e.to_str()) == Some("safetensors")
+            let ext = path
+                .extension()
+                .and_then(|e| e.to_str())
+                .unwrap_or("")
+                .to_ascii_lowercase();
+            if ext == "safetensors"
                 && let Ok(mut f) = fs::File::open(&path)
             {
                 use std::io::Read;
@@ -466,15 +504,149 @@ pub fn build_preview(raw_path: &str) -> PreviewContent {
                         };
                     }
                 }
+            } else if ext == "gguf"
+                && let Ok(mut f) = fs::File::open(&path)
+            {
+                use std::io::Read;
+                let mut hdr = [0u8; 24];
+                if f.read_exact(&mut hdr).is_ok() && &hdr[0..4] == b"GGUF" {
+                    let version = u32::from_le_bytes([hdr[4], hdr[5], hdr[6], hdr[7]]);
+                    let tensor_count = u64::from_le_bytes([
+                        hdr[8], hdr[9], hdr[10], hdr[11], hdr[12], hdr[13], hdr[14], hdr[15],
+                    ]);
+                    let kv_count = u64::from_le_bytes([
+                        hdr[16], hdr[17], hdr[18], hdr[19], hdr[20], hdr[21], hdr[22], hdr[23],
+                    ]);
+                    return PreviewContent::ModelHeader {
+                        format: "GGUF".into(),
+                        metadata: vec![
+                            ("Version".into(), version.to_string()),
+                            ("Tensors".into(), tensor_count.to_string()),
+                            ("Metadata KVs".into(), kv_count.to_string()),
+                        ],
+                    };
+                }
             }
             PreviewContent::Unsupported {
                 reason: "Model weight binary".into(),
             }
         }
         _ => PreviewContent::Unsupported {
-            reason: "Select a text, Markdown, image, or SafeTensors file to preview".into(),
+            reason: "Select a Markdown, code, CSV, image, ZIP/tar archive, or SafeTensors/GGUF file to preview".into(),
         },
     }
+}
+
+fn preview_archive(path: &Path) -> PreviewContent {
+    let name_lower = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+
+    if name_lower.ends_with(".zip") {
+        if let Ok(entries) = list_zip_entries(path) {
+            return PreviewContent::ArchiveEntries { entries };
+        }
+    }
+
+    if name_lower.ends_with(".tar")
+        || name_lower.ends_with(".tar.gz")
+        || name_lower.ends_with(".tgz")
+        || name_lower.ends_with(".tar.xz")
+        || name_lower.ends_with(".tar.zst")
+        || name_lower.ends_with(".tar.bz2")
+    {
+        if let Ok(out) = Command::new("tar").args(["-tvf"]).arg(path).output()
+            && out.status.success()
+        {
+            let text = String::from_utf8_lossy(&out.stdout);
+            let entries: Vec<(String, u64)> = text
+                .lines()
+                .take(250)
+                .filter_map(|line| {
+                    let cols: Vec<&str> = line.split_whitespace().collect();
+                    if cols.len() >= 6 {
+                        let size = cols[2].parse::<u64>().unwrap_or(0);
+                        let rel = cols[5..].join(" ");
+                        Some((rel, size))
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+            return PreviewContent::ArchiveEntries { entries };
+        }
+    }
+
+    PreviewContent::Unsupported {
+        reason: "Archive listing unavailable for this format".into(),
+    }
+}
+
+/// Pure-Rust ZIP Central Directory reader (no external `unzip` binary required).
+pub fn list_zip_entries(path: &Path) -> Result<Vec<(String, u64)>, String> {
+    use std::io::{Read, Seek, SeekFrom};
+
+    let mut file = fs::File::open(path).map_err(|e| e.to_string())?;
+    let file_len = file.metadata().map_err(|e| e.to_string())?.len();
+    if file_len < 22 {
+        return Err("File too small to be a ZIP archive".into());
+    }
+
+    let tail_len = file_len.min(65_557) as usize;
+    file.seek(SeekFrom::End(-(tail_len as i64)))
+        .map_err(|e| e.to_string())?;
+    let mut tail = vec![0u8; tail_len];
+    file.read_exact(&mut tail).map_err(|e| e.to_string())?;
+
+    // Locate End of Central Directory signature (0x06054b50)
+    let eocd_pos = (0..=tail_len - 22)
+        .rev()
+        .find(|&i| tail[i..i + 4] == [0x50, 0x4b, 0x05, 0x06])
+        .ok_or("ZIP EOCD signature not found")?;
+
+    let total_entries = u16::from_le_bytes([tail[eocd_pos + 10], tail[eocd_pos + 11]]) as usize;
+    let cd_size = u32::from_le_bytes([
+        tail[eocd_pos + 12],
+        tail[eocd_pos + 13],
+        tail[eocd_pos + 14],
+        tail[eocd_pos + 15],
+    ]) as usize;
+    let cd_offset = u32::from_le_bytes([
+        tail[eocd_pos + 16],
+        tail[eocd_pos + 17],
+        tail[eocd_pos + 18],
+        tail[eocd_pos + 19],
+    ]) as u64;
+
+    if cd_size > 16 * 1024 * 1024 {
+        return Err("ZIP central directory too large".into());
+    }
+    file.seek(SeekFrom::Start(cd_offset))
+        .map_err(|e| e.to_string())?;
+    let mut cd = vec![0u8; cd_size];
+    file.read_exact(&mut cd).map_err(|e| e.to_string())?;
+
+    let mut entries = Vec::with_capacity(total_entries.min(300));
+    let mut pos = 0usize;
+    while pos + 46 <= cd.len() && entries.len() < 300 {
+        if cd[pos..pos + 4] != [0x50, 0x4b, 0x01, 0x02] {
+            break;
+        }
+        let uncomp_size =
+            u32::from_le_bytes([cd[pos + 24], cd[pos + 25], cd[pos + 26], cd[pos + 27]]) as u64;
+        let name_len = u16::from_le_bytes([cd[pos + 28], cd[pos + 29]]) as usize;
+        let extra_len = u16::from_le_bytes([cd[pos + 30], cd[pos + 31]]) as usize;
+        let comment_len = u16::from_le_bytes([cd[pos + 32], cd[pos + 33]]) as usize;
+        let name_start = pos + 46;
+        let name_end = (name_start + name_len).min(cd.len());
+        let name = String::from_utf8_lossy(&cd[name_start..name_end]).into_owned();
+        entries.push((name, uncomp_size));
+        pos = name_end + extra_len + comment_len;
+    }
+
+    Ok(entries)
 }
 
 /// Bounded recursive file search (filename and optional UTF-8 content match).
@@ -634,5 +806,57 @@ mod tests {
         assert!(!base.join("sub").exists());
 
         let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn parses_zip_central_directory() {
+        // Minimal valid stored ZIP with a single entry "hello.txt" (5 bytes)
+        let name = b"hello.txt";
+        let data = b"world";
+        let mut zip = Vec::new();
+        // Local file header (30 + name + data)
+        zip.extend_from_slice(&[0x50, 0x4b, 0x03, 0x04]);
+        zip.extend_from_slice(&[20, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+        zip.extend_from_slice(&[0, 0, 0, 0]); // crc
+        zip.extend_from_slice(&(data.len() as u32).to_le_bytes());
+        zip.extend_from_slice(&(data.len() as u32).to_le_bytes());
+        zip.extend_from_slice(&(name.len() as u16).to_le_bytes());
+        zip.extend_from_slice(&0u16.to_le_bytes());
+        zip.extend_from_slice(name);
+        zip.extend_from_slice(data);
+
+        let cd_offset = zip.len() as u32;
+        // Central directory header (46 + name)
+        zip.extend_from_slice(&[0x50, 0x4b, 0x01, 0x02]);
+        zip.extend_from_slice(&[20, 0, 20, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+        zip.extend_from_slice(&[0, 0, 0, 0]);
+        zip.extend_from_slice(&(data.len() as u32).to_le_bytes());
+        zip.extend_from_slice(&(data.len() as u32).to_le_bytes());
+        zip.extend_from_slice(&(name.len() as u16).to_le_bytes());
+        zip.extend_from_slice(&0u16.to_le_bytes()); // extra
+        zip.extend_from_slice(&0u16.to_le_bytes()); // comment
+        zip.extend_from_slice(&0u16.to_le_bytes()); // disk
+        zip.extend_from_slice(&0u16.to_le_bytes()); // internal
+        zip.extend_from_slice(&0u32.to_le_bytes()); // external
+        zip.extend_from_slice(&0u32.to_le_bytes()); // local header offset
+        zip.extend_from_slice(name);
+        let cd_size = (zip.len() as u32) - cd_offset;
+
+        // EOCD (22 bytes)
+        zip.extend_from_slice(&[0x50, 0x4b, 0x05, 0x06]);
+        zip.extend_from_slice(&0u16.to_le_bytes());
+        zip.extend_from_slice(&0u16.to_le_bytes());
+        zip.extend_from_slice(&1u16.to_le_bytes());
+        zip.extend_from_slice(&1u16.to_le_bytes());
+        zip.extend_from_slice(&cd_size.to_le_bytes());
+        zip.extend_from_slice(&cd_offset.to_le_bytes());
+        zip.extend_from_slice(&0u16.to_le_bytes());
+
+        let path = std::env::temp_dir().join(format!("kaage_test_{}.zip", std::process::id()));
+        fs::write(&path, &zip).unwrap();
+        let entries = list_zip_entries(&path).unwrap();
+        let _ = fs::remove_file(&path);
+
+        assert_eq!(entries, vec![("hello.txt".to_string(), 5)]);
     }
 }

@@ -106,4 +106,3 @@ cargo run -p kaage-ui
 | `KAAGE_DIST_DIR` | `dist` | Static directory serving the built WASM webtop |
 | `KAAGE_ALLOWED_USER` | *(unset)* | Required `Tailscale-User-Login` header value |
 | `KAAGE_CONTAINER_CLI` | `docker` | Container CLI binary used by the `Shell` button (e.g. `podman`) |
-| `KAAGE_BTM_BIN` | `btm` | Override path to the `bottom` (`btm`) system monitor binary |

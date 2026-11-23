@@ -274,33 +274,6 @@ impl KaageApp {
         self.send_client_msg(ClientMsg::RefreshDashboard);
     }
 
-    fn open_bottom(&mut self) {
-        if self.wm.focus_tab_by_title("Bottom (btm)") {
-            return;
-        }
-        let session_id = self.next_pty_id;
-        self.next_pty_id += 1;
-
-        self.wm.open_window(
-            "Bottom (btm)".into(),
-            PaneKind::Terminal(TerminalPane::new(session_id, 100, 30)),
-            self.stage_origin(28.0, 24.0),
-            Vec2::new(860.0, 520.0),
-        );
-
-        self.send_client_msg(ClientMsg::SpawnPty {
-            session_id,
-            cols: 100,
-            rows: 30,
-            cmd: Some(vec![
-                "btm".into(),
-                "--dot_marker".into(),
-                "--color".into(),
-                "gruvbox".into(),
-            ]),
-        });
-    }
-
     fn open_ai_jobs(&mut self) {
         if !self
             .wm
@@ -613,7 +586,6 @@ impl eframe::App for KaageApp {
                     self.send_client_msg(ClientMsg::ListUnits);
                 }
                 DesktopIconAction::OpenSystemMonitor => self.open_system_monitor(),
-                DesktopIconAction::OpenBottom => self.open_bottom(),
                 DesktopIconAction::OpenAiJobs => self.open_ai_jobs(),
                 DesktopIconAction::OpenHttpPorts => self.open_http_ports(),
                 DesktopIconAction::OpenTailscale => self.open_tailscale(),
@@ -649,7 +621,6 @@ impl eframe::App for KaageApp {
                     TrackerAction::OpenContainers => self.open_containers_window(),
                     TrackerAction::OpenSystemMonitor => self.open_system_monitor(),
                     TrackerAction::OpenVitals => self.open_vitals(),
-                    TrackerAction::OpenBottom => self.open_bottom(),
                     TrackerAction::OpenAiJobs => self.open_ai_jobs(),
                     TrackerAction::OpenHttpPorts => self.open_http_ports(),
                     TrackerAction::OpenTailscale => self.open_tailscale(),
@@ -749,7 +720,6 @@ impl eframe::App for KaageApp {
                     self.send_client_msg(ClientMsg::ListUnits);
                 }
                 PaletteAction::OpenSystemMonitor => self.open_system_monitor(),
-                PaletteAction::OpenBottom => self.open_bottom(),
                 PaletteAction::OpenAiJobs => self.open_ai_jobs(),
                 PaletteAction::OpenHttpPorts => self.open_http_ports(),
                 PaletteAction::OpenTailscale => self.open_tailscale(),

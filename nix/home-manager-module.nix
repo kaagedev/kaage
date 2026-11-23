@@ -79,10 +79,7 @@ in
 
   config = lib.mkIf cfg.enable {
     home.packages =
-      [
-        cfg.package
-        pkgs.bottom
-      ]
+      [ cfg.package ]
       ++ lib.optional cfg.installNativeClient self.packages.${system}.kaage-ui-native;
 
     systemd.user.services.kaaged = lib.mkIf cfg.autoStart {

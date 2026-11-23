@@ -9,7 +9,6 @@ pub enum PaletteAction {
     OpenFileTracker,
     OpenSystemd { scope: ScopeFilter, state: StateFilter },
     OpenSystemMonitor,
-    OpenBottom,
     OpenAiJobs,
     OpenHttpPorts,
     OpenTailscale,
@@ -252,12 +251,6 @@ fn build_items(
                 scope: ScopeFilter::All,
                 state: StateFilter::All,
             },
-        },
-        PaletteItem {
-            label: "Open Bottom (btm)".into(),
-            category: "APP",
-            shortcut: "BTM".into(),
-            action: PaletteAction::OpenBottom,
         },
         PaletteItem {
             label: "New Interactive Shell Terminal".into(),

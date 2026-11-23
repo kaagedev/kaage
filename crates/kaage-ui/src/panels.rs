@@ -14,7 +14,7 @@ pub fn render_system_monitor(
     mem_history: &[f32],
     send_msg: &mut dyn FnMut(ClientMsg),
 ) -> Option<InspectorSpawnRequest> {
-    let mut spawn_req = None;
+    let spawn_req = None;
 
     ui.horizontal(|ui| {
         ui.label(
@@ -25,17 +25,6 @@ pub fn render_system_monitor(
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             if be_button(ui, "Refresh").clicked() {
                 send_msg(ClientMsg::RefreshDashboard);
-            }
-            if be_button(ui, "Open btm").clicked() {
-                spawn_req = Some(InspectorSpawnRequest::OpenCommandTab {
-                    title: "Bottom (btm)".into(),
-                    cmd: vec![
-                        "btm".into(),
-                        "--dot_marker".into(),
-                        "--color".into(),
-                        "gruvbox".into(),
-                    ],
-                });
             }
         });
     });

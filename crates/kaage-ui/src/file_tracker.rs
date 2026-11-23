@@ -726,14 +726,16 @@ fn render_preview_pane(
         .id_salt("tracker_preview_scroll")
         .show(ui, |ui| match preview {
             Some(PreviewContent::Text {
-                content, truncated, ..
+                content,
+                is_markdown,
+                truncated,
             }) => {
                 if *truncated {
                     ui.label(
                         RichText::new("(Truncated to first 256 KB)")
                             .small()
                             .italics()
-                            .color(Color32::from_rgb(100, 80, 20)),
+                            .color(crate::theme::palette().accent),
                     );
                 }
                 if *editing {
@@ -742,47 +744,247 @@ fn render_preview_pane(
                             .code_editor()
                             .desired_width(f32::INFINITY),
                     );
+                } else if *is_markdown {
+                    render_markdown_preview(ui, content);
+                } else if path.to_ascii_lowercase().ends_with(".csv") {
+                    render_csv_preview(ui, content);
                 } else {
-                    ui.label(RichText::new(content).monospace().color(crate::theme::text_color()));
+                    render_code_preview(ui, content);
                 }
             }
-            Some(PreviewContent::ImageBytes { .. }) => {
+            Some(PreviewContent::ImageBytes { mime, bytes }) => {
                 if let Some(tex) = preview_texture {
-                    let max_w = ui.available_width().max(120.0);
                     let tex_size = tex.size_vec2();
+                    ui.label(
+                        RichText::new(format!(
+                            "{} × {} px  ·  {}  ·  {}",
+                            tex_size.x as u32,
+                            tex_size.y as u32,
+                            mime,
+                            format_bytes(bytes.len() as u64)
+                        ))
+                        .monospace()
+                        .size(10.5)
+                        .color(crate::theme::muted_text_color()),
+                    );
+                    ui.add_space(4.0);
+                    let max_w = ui.available_width().max(120.0);
                     let scale = (max_w / tex_size.x.max(1.0)).min(1.0);
                     ui.image((tex.id(), tex_size * scale));
                 } else {
-                    ui.label(RichText::new("Could not decode image preview").color(crate::theme::text_color()));
+                    ui.label(
+                        RichText::new(format!("Could not decode {mime} image preview"))
+                            .color(crate::theme::text_color()),
+                    );
                 }
             }
             Some(PreviewContent::ModelHeader { format, metadata }) => {
+                let pal = crate::theme::palette();
                 ui.label(
-                    RichText::new(format!("Format: {format}"))
+                    RichText::new(format!("Model Checkpoint: {format}"))
                         .strong()
-                        .color(crate::theme::text_color()),
+                        .size(13.0)
+                        .color(pal.accent),
                 );
-                for (k, v) in metadata {
-                    ui.label(
-                        RichText::new(format!("{k}: {v}"))
-                            .monospace()
-                            .color(crate::theme::text_color()),
-                    );
-                }
+                ui.add_space(4.0);
+                egui::Frame::NONE
+                    .fill(pal.well)
+                    .stroke(egui::Stroke::new(1.0, pal.border))
+                    .inner_margin(6.0)
+                    .show(ui, |ui| {
+                        for (k, v) in metadata {
+                            ui.horizontal(|ui| {
+                                ui.label(
+                                    RichText::new(format!("{k}:"))
+                                        .monospace()
+                                        .strong()
+                                        .color(pal.status_sky),
+                                );
+                                ui.label(RichText::new(v).monospace().color(pal.text));
+                            });
+                        }
+                    });
             }
             Some(PreviewContent::ArchiveEntries { entries }) => {
-                for (rel, sz) in entries {
+                let pal = crate::theme::palette();
+                let total_uncomp: u64 = entries.iter().map(|(_, s)| *s).sum();
+                ui.label(
+                    RichText::new(format!(
+                        "Archive Contents: {} entries · {} uncompressed",
+                        entries.len(),
+                        format_bytes(total_uncomp)
+                    ))
+                    .strong()
+                    .size(11.5)
+                    .color(pal.accent),
+                );
+                ui.add_space(4.0);
+                if entries.is_empty() {
                     ui.label(
-                        RichText::new(format!("{rel} ({})", format_bytes(*sz)))
-                            .monospace()
-                            .color(crate::theme::text_color()),
+                        RichText::new("(Empty archive)")
+                            .italics()
+                            .color(pal.text_muted),
                     );
+                } else {
+                    egui::Frame::NONE
+                        .fill(pal.well)
+                        .stroke(egui::Stroke::new(1.0, pal.border))
+                        .inner_margin(6.0)
+                        .show(ui, |ui| {
+                            for (rel, sz) in entries {
+                                let is_dir = rel.ends_with('/');
+                                ui.horizontal(|ui| {
+                                    let tag = if is_dir { "[DIR]" } else { "     " };
+                                    ui.label(
+                                        RichText::new(format!("{tag} {rel}"))
+                                            .monospace()
+                                            .size(11.0)
+                                            .color(if is_dir { pal.accent } else { pal.text }),
+                                    );
+                                    if !is_dir {
+                                        ui.with_layout(
+                                            egui::Layout::right_to_left(egui::Align::Center),
+                                            |ui| {
+                                                ui.label(
+                                                    RichText::new(format_bytes(*sz))
+                                                        .monospace()
+                                                        .size(10.5)
+                                                        .color(pal.text_muted),
+                                                );
+                                            },
+                                        );
+                                    }
+                                });
+                            }
+                        });
                 }
             }
             Some(PreviewContent::Unsupported { reason }) => {
                 ui.label(RichText::new(reason).color(crate::theme::text_color()));
             }
             None => {}
+        });
+}
+
+fn render_markdown_preview(ui: &mut Ui, content: &str) {
+    let pal = crate::theme::palette();
+    let mut in_code_block = false;
+    let mut code_buf = String::new();
+
+    for line in content.lines() {
+        if line.trim_start().starts_with("```") {
+            if in_code_block {
+                egui::Frame::NONE
+                    .fill(pal.well)
+                    .stroke(egui::Stroke::new(1.0, pal.border))
+                    .inner_margin(6.0)
+                    .show(ui, |ui| {
+                        ui.set_min_width(ui.available_width());
+                        ui.label(
+                            RichText::new(code_buf.trim_end())
+                                .monospace()
+                                .size(11.0)
+                                .color(pal.text),
+                        );
+                    });
+                code_buf.clear();
+                in_code_block = false;
+            } else {
+                in_code_block = true;
+            }
+            continue;
+        }
+        if in_code_block {
+            code_buf.push_str(line);
+            code_buf.push('\n');
+            continue;
+        }
+
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            ui.add_space(4.0);
+        } else if trimmed == "---" || trimmed == "***" {
+            ui.separator();
+        } else if let Some(h) = trimmed.strip_prefix("### ") {
+            ui.label(RichText::new(h).strong().size(13.5).color(pal.accent));
+        } else if let Some(h) = trimmed.strip_prefix("## ") {
+            ui.add_space(3.0);
+            ui.label(RichText::new(h).strong().size(15.0).color(pal.accent));
+        } else if let Some(h) = trimmed.strip_prefix("# ") {
+            ui.add_space(4.0);
+            ui.label(RichText::new(h).strong().size(17.5).color(pal.text));
+            ui.separator();
+        } else if let Some(q) = trimmed.strip_prefix("> ") {
+            egui::Frame::NONE
+                .fill(pal.section_bg)
+                .stroke(egui::Stroke::new(1.0, pal.accent))
+                .inner_margin(5.0)
+                .show(ui, |ui| {
+                    ui.label(RichText::new(q).italics().color(pal.text_muted));
+                });
+        } else if let Some(item) = trimmed.strip_prefix("- ").or_else(|| trimmed.strip_prefix("* "))
+        {
+            ui.horizontal_wrapped(|ui| {
+                ui.label(RichText::new("•").strong().color(pal.accent));
+                ui.label(RichText::new(item.replace("**", "")).color(pal.text));
+            });
+        } else {
+            ui.label(RichText::new(trimmed.replace("**", "")).color(pal.text));
+        }
+    }
+}
+
+fn render_csv_preview(ui: &mut Ui, content: &str) {
+    let pal = crate::theme::palette();
+    egui::Frame::NONE
+        .fill(pal.well)
+        .stroke(egui::Stroke::new(1.0, pal.border))
+        .inner_margin(6.0)
+        .show(ui, |ui| {
+            for (row_idx, line) in content.lines().take(60).enumerate() {
+                let cols: Vec<&str> = line.split(',').collect();
+                let formatted = cols
+                    .iter()
+                    .map(|c| format!("{:<16}", c.trim().chars().take(15).collect::<String>()))
+                    .collect::<Vec<_>>()
+                    .join(" │ ");
+                ui.label(
+                    RichText::new(formatted)
+                        .monospace()
+                        .size(10.5)
+                        .color(if row_idx == 0 { pal.accent } else { pal.text }),
+                );
+                if row_idx == 0 {
+                    ui.separator();
+                }
+            }
+        });
+}
+
+fn render_code_preview(ui: &mut Ui, content: &str) {
+    let pal = crate::theme::palette();
+    egui::Frame::NONE
+        .fill(pal.well)
+        .stroke(egui::Stroke::new(1.0, pal.border))
+        .inner_margin(6.0)
+        .show(ui, |ui| {
+            ui.set_min_width(ui.available_width());
+            for (idx, line) in content.lines().take(400).enumerate() {
+                ui.horizontal(|ui| {
+                    ui.label(
+                        RichText::new(format!("{:>4}", idx + 1))
+                            .monospace()
+                            .size(10.5)
+                            .color(pal.text_muted),
+                    );
+                    ui.label(
+                        RichText::new(line)
+                            .monospace()
+                            .size(11.0)
+                            .color(pal.text),
+                    );
+                });
+            }
         });
 }
 
