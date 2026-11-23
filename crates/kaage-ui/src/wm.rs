@@ -2,10 +2,17 @@ use crate::inspectors::{
     InspectorSpawnRequest, ScopeFilter, StateFilter, render_docker_inspector,
     render_systemd_inspector,
 };
+use crate::panels::{
+    render_ai_jobs, render_http_ports, render_system_monitor, render_tailscale_panel,
+};
 use crate::terminal::TerminalPane;
-use crate::theme::{BEOS_PANEL_GRAY, BEOS_TAB_INACTIVE, BEOS_TAB_YELLOW, draw_beos_bevel};
+use crate::theme::{
+    BEOS_PANEL_GRAY, BEOS_TAB_INACTIVE, BEOS_TAB_YELLOW, TOPBAR_HEIGHT, draw_beos_bevel,
+};
 use egui::{Color32, CornerRadius, Id, Pos2, Rect, Sense, Vec2};
-use kaage_proto::{ClientMsg, ContainerInfo, NixosInfo, SystemdUnitInfo, SystemdUnitStatus};
+use kaage_proto::{
+    ClientMsg, ContainerInfo, DashboardSnapshot, NixosInfo, SystemdUnitInfo, SystemdUnitStatus,
+};
 
 pub enum PaneKind {
     Terminal(TerminalPane),
@@ -17,6 +24,12 @@ pub enum PaneKind {
     DockerInspector {
         filter: String,
     },
+    SystemMonitor,
+    AiJobs,
+    HttpPorts {
+        filter: String,
+    },
+    TailscalePanel,
 }
 
 pub struct BeTab {
@@ -54,7 +67,7 @@ impl BeWindowManager {
         id
     }
 
-    pub fn open_window(&mut self, title: String, kind: PaneKind, pos: Pos2, size: Vec2) {
+    pub fn open_window(&mut self, title: String, kind: PaneKind, pos: Pos2, size: Vec2) -> u64 {
         let id = self.alloc_id();
         self.groups.push(BeWindowGroup {
             id,
@@ -65,6 +78,31 @@ impl BeWindowManager {
             tabs: vec![BeTab { id, title, kind }],
             shaded: false,
         });
+        id
+    }
+
+    pub fn add_tab_to_group(&mut self, group_id: u64, title: String, kind: PaneKind) {
+        let tab_id = self.alloc_id();
+        if let Some(group) = self.groups.iter_mut().find(|g| g.id == group_id) {
+            group.tabs.push(BeTab {
+                id: tab_id,
+                title,
+                kind,
+            });
+        }
+    }
+
+    pub fn focus_matching_tab(&mut self, predicate: impl Fn(&PaneKind) -> bool) -> bool {
+        for g_idx in 0..self.groups.len() {
+            for t_idx in 0..self.groups[g_idx].tabs.len() {
+                if predicate(&self.groups[g_idx].tabs[t_idx].kind) {
+                    let gid = self.groups[g_idx].id;
+                    self.focus_tab(gid, t_idx);
+                    return true;
+                }
+            }
+        }
+        false
     }
 
     pub fn focus_tab(&mut self, group_id: u64, tab_idx: usize) {
@@ -79,6 +117,79 @@ impl BeWindowManager {
         }
     }
 
+    pub fn open_or_focus_systemd(
+        &mut self,
+        scope: ScopeFilter,
+        state: StateFilter,
+        sidebar_width: f32,
+    ) {
+        for g_idx in 0..self.groups.len() {
+            for t_idx in 0..self.groups[g_idx].tabs.len() {
+                if let PaneKind::SystemdInspector {
+                    scope_filter,
+                    state_filter,
+                    ..
+                } = &mut self.groups[g_idx].tabs[t_idx].kind
+                {
+                    *scope_filter = scope;
+                    *state_filter = state;
+                    let gid = self.groups[g_idx].id;
+                    self.focus_tab(gid, t_idx);
+                    return;
+                }
+            }
+        }
+        let start_x = if sidebar_width > 0.0 {
+            sidebar_width + 24.0
+        } else {
+            24.0
+        };
+        self.open_window(
+            "Systemd Services".into(),
+            PaneKind::SystemdInspector {
+                filter: String::new(),
+                scope_filter: scope,
+                state_filter: state,
+            },
+            Pos2::new(start_x, TOPBAR_HEIGHT + 12.0),
+            Vec2::new(680.0, 420.0),
+        );
+    }
+
+    pub fn tile_windows(&mut self, screen: Rect, sidebar_width: f32) {
+        let count = self.groups.len();
+        if count == 0 {
+            return;
+        }
+        let left = if sidebar_width > 0.0 {
+            sidebar_width + 22.0
+        } else {
+            14.0
+        };
+        let top = TOPBAR_HEIGHT + 12.0;
+        let right_margin = if screen.width() >= 760.0 { 104.0 } else { 14.0 };
+        let avail_w = (screen.width() - left - right_margin).max(320.0);
+        let avail_h = (screen.height() - top - 16.0).max(260.0);
+        let tab_h = 21.0;
+
+        let cols = if count == 1 { 1 } else { 2 };
+        let rows = count.div_ceil(cols);
+        let cell_w = ((avail_w - (cols as f32 - 1.0) * 12.0) / cols as f32).max(260.0);
+        let cell_h = ((avail_h - (rows as f32 - 1.0) * 12.0) / rows as f32 - tab_h).max(160.0);
+
+        for (i, group) in self.groups.iter_mut().enumerate() {
+            let col = i % cols;
+            let row = i / cols;
+            group.shaded = false;
+            group.pos = Pos2::new(
+                left + col as f32 * (cell_w + 12.0),
+                top + row as f32 * (cell_h + tab_h + 12.0),
+            );
+            group.size = Vec2::new(cell_w, cell_h);
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
     pub fn show(
         &mut self,
         ctx: &egui::Context,
@@ -86,6 +197,9 @@ impl BeWindowManager {
         units: &[SystemdUnitInfo],
         selected_unit_status: &mut Option<SystemdUnitStatus>,
         containers: &[ContainerInfo],
+        dashboard: Option<&DashboardSnapshot>,
+        cpu_history: &[f32],
+        mem_history: &[f32],
         send_msg: &mut dyn FnMut(ClientMsg),
     ) -> Vec<InspectorSpawnRequest> {
         let mut spawn_requests = Vec::new();
@@ -181,6 +295,7 @@ impl BeWindowManager {
                                 }
                             } else {
                                 group.pos += delta;
+                                group.pos.y = group.pos.y.max(TOPBAR_HEIGHT + 2.0);
                             }
                         }
 
@@ -245,6 +360,28 @@ impl BeWindowManager {
                                     ) {
                                         spawn_requests.push(req);
                                     }
+                                }
+                                PaneKind::SystemMonitor => {
+                                    render_system_monitor(
+                                        &mut child_ui,
+                                        dashboard,
+                                        cpu_history,
+                                        mem_history,
+                                        send_msg,
+                                    );
+                                }
+                                PaneKind::AiJobs => {
+                                    if let Some(req) =
+                                        render_ai_jobs(&mut child_ui, dashboard, send_msg)
+                                    {
+                                        spawn_requests.push(req);
+                                    }
+                                }
+                                PaneKind::HttpPorts { filter } => {
+                                    render_http_ports(&mut child_ui, filter, dashboard, send_msg);
+                                }
+                                PaneKind::TailscalePanel => {
+                                    render_tailscale_panel(&mut child_ui, dashboard, send_msg);
                                 }
                             }
                         }

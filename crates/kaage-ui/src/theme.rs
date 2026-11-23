@@ -2,7 +2,9 @@ use egui::{Color32, CornerRadius, Rect, Response, Sense, Stroke, Ui, Vec2};
 
 pub const BEOS_DESKTOP_BLUE: Color32 = Color32::from_rgb(51, 102, 152);
 pub const BEOS_PANEL_GRAY: Color32 = Color32::from_rgb(216, 216, 216);
+pub const BEOS_PANEL_LO: Color32 = Color32::from_rgb(196, 196, 196);
 pub const BEOS_WIDGET_FACE: Color32 = Color32::from_rgb(232, 232, 232);
+pub const BEOS_WELL_WHITE: Color32 = Color32::from_rgb(255, 255, 255);
 pub const BEOS_TAB_YELLOW: Color32 = Color32::from_rgb(255, 203, 0);
 pub const BEOS_TAB_INACTIVE: Color32 = Color32::from_rgb(230, 230, 230);
 pub const BEOS_BEVEL_LIGHT: Color32 = Color32::from_rgb(255, 255, 255);
@@ -10,6 +12,10 @@ pub const BEOS_BEVEL_DARK: Color32 = Color32::from_rgb(122, 122, 122);
 pub const BEOS_BORDER_BLACK: Color32 = Color32::from_rgb(40, 40, 40);
 pub const BEOS_STATUS_GREEN: Color32 = Color32::from_rgb(46, 139, 87);
 pub const BEOS_STATUS_RED: Color32 = Color32::from_rgb(178, 34, 34);
+pub const BEOS_LED_GREEN: Color32 = Color32::from_rgb(41, 184, 77);
+pub const BEOS_LED_GOLD: Color32 = Color32::from_rgb(255, 190, 0);
+pub const BEOS_LED_RED: Color32 = Color32::from_rgb(220, 53, 69);
+pub const TOPBAR_HEIGHT: f32 = 28.0;
 
 pub fn apply_beos_style(ctx: &egui::Context) {
     ctx.all_styles_mut(|style| {

@@ -85,9 +85,119 @@ pub struct HostMetrics {
     pub uptime_secs: u64,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ProcessSummary {
+    pub pid: u32,
+    pub name: String,
+    pub cpu_percent: f32,
+    pub mem_mb: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct GpuInfo {
+    pub name: String,
+    pub utilization_percent: Option<f32>,
+    pub vram_used_mb: u64,
+    pub vram_total_mb: u64,
+    pub temperature_c: Option<f32>,
+    pub power_draw_w: Option<f32>,
+    pub power_limit_w: Option<f32>,
+    pub source: String,
+    pub note: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AiJobInfo {
+    pub id: String,
+    pub title: String,
+    pub state: String,
+    pub detail: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct ComfyUiStatus {
+    pub reachable: bool,
+    pub url: String,
+    pub version: String,
+    pub running_jobs: Vec<AiJobInfo>,
+    pub pending_jobs: Vec<AiJobInfo>,
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct UnslothStatus {
+    pub reachable: bool,
+    pub url: String,
+    pub service_name: String,
+    pub jobs: Vec<AiJobInfo>,
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ListeningPortInfo {
+    pub port: u16,
+    pub bind_addr: String,
+    pub process: String,
+    pub pid: Option<u32>,
+    pub label: String,
+    pub tailscale_url: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TailscaleServeEntry {
+    pub https_url: String,
+    pub target: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TailscalePeerInfo {
+    pub hostname: String,
+    pub dns_name: String,
+    pub os: String,
+    pub tailscale_ip: String,
+    pub online: bool,
+    pub active: bool,
+    pub relay: String,
+    pub rx_bytes: u64,
+    pub tx_bytes: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct TailscaleInfo {
+    pub available: bool,
+    pub backend_state: String,
+    pub version: String,
+    pub hostname: String,
+    pub dns_name: String,
+    pub tailscale_ips: Vec<String>,
+    pub relay: String,
+    pub serves: Vec<TailscaleServeEntry>,
+    pub peers: Vec<TailscalePeerInfo>,
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DashboardSnapshot {
+    pub cpu_percent: f32,
+    pub cpu_cores: Vec<f32>,
+    pub cpu_brand: String,
+    pub load_avg: [f64; 3],
+    pub mem_used_mb: u64,
+    pub mem_total_mb: u64,
+    pub swap_used_mb: u64,
+    pub swap_total_mb: u64,
+    pub top_processes: Vec<ProcessSummary>,
+    pub gpus: Vec<GpuInfo>,
+    pub comfyui: ComfyUiStatus,
+    pub unsloth: UnslothStatus,
+    pub listening_ports: Vec<ListeningPortInfo>,
+    pub tailscale: TailscaleInfo,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ClientMsg {
     ListUnits,
+    RefreshDashboard,
     GetUnitStatus {
         unit: String,
         scope: UnitScope,
@@ -126,6 +236,7 @@ pub enum ClientMsg {
 pub enum ServerMsg {
     NixosInfo(NixosInfo),
     Metrics(HostMetrics),
+    Dashboard(DashboardSnapshot),
     UnitsSnapshot(Vec<SystemdUnitInfo>),
     UnitStatus(SystemdUnitStatus),
     ContainersSnapshot(Vec<ContainerInfo>),

@@ -1,4 +1,5 @@
 mod nixos;
+mod telemetry;
 
 use axum::{
     Json, Router,
@@ -91,6 +92,7 @@ fn build_router(state: Arc<AppState>) -> Router {
         .route("/api/v1/health", get(http_health))
         .route("/api/v1/nixos", get(http_nixos))
         .route("/api/v1/metrics", get(http_metrics))
+        .route("/api/v1/dashboard", get(http_dashboard))
         .route("/api/v1/units", get(http_list_units))
         .route("/api/v1/units/{unit}", get(http_unit_status))
         .route("/api/v1/units/{unit}/status", get(http_unit_status))
@@ -304,6 +306,16 @@ async fn http_nixos(
         return (StatusCode::UNAUTHORIZED, "Unauthorized").into_response();
     }
     Json(state.nixos.clone()).into_response()
+}
+
+async fn http_dashboard(
+    headers: HeaderMap,
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    if !check_auth(&headers, &state.allowed_user) {
+        return (StatusCode::UNAUTHORIZED, "Unauthorized").into_response();
+    }
+    Json(telemetry::collect_dashboard_snapshot().await).into_response()
 }
 
 async fn http_metrics(
@@ -549,6 +561,18 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
         }
     });
 
+    // Background dashboard telemetry ticker (GPU, per-core CPU, memory, ComfyUI, Unsloth, ports, Tailscale every 4s)
+    let dash_tx = out_tx.clone();
+    let dash_task = tokio::spawn(async move {
+        loop {
+            let snap = telemetry::collect_dashboard_snapshot().await;
+            if dash_tx.send(ServerMsg::Dashboard(snap)).is_err() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_secs(4)).await;
+        }
+    });
+
     let ptys: Arc<Mutex<HashMap<u32, PtySession>>> = Arc::new(Mutex::new(HashMap::new()));
 
     while let Some(Ok(msg)) = ws_rx.next().await {
@@ -563,6 +587,10 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
             ClientMsg::ListUnits => {
                 let units = list_all_systemd_units(&state).await;
                 let _ = out_tx.send(ServerMsg::UnitsSnapshot(units));
+            }
+            ClientMsg::RefreshDashboard => {
+                let snap = telemetry::collect_dashboard_snapshot().await;
+                let _ = out_tx.send(ServerMsg::Dashboard(snap));
             }
             ClientMsg::GetUnitStatus { unit, scope } => {
                 let normalized = normalize_service_name(&unit);
@@ -746,6 +774,7 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
 
     // Kill and clean up any live PTY child processes on disconnect
     ptys.lock().unwrap().clear();
+    dash_task.abort();
     metrics_task.abort();
     send_task.abort();
 }

@@ -21,6 +21,8 @@ let
       pkgs.coreutils
       pkgs.systemd
       pkgs.bashInteractive
+      pkgs.iproute2
+      pkgs.tailscale
     ]
     ++ cfg.extraPath
   );

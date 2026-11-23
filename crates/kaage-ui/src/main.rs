@@ -1,24 +1,32 @@
+mod clock;
 mod deskbar;
+mod desktop_icons;
 mod inspectors;
+mod panels;
 mod terminal;
 mod theme;
+mod tracker;
 mod wm;
 
 use deskbar::{BeDeskbar, DeskbarAction};
+use desktop_icons::{DesktopIconAction, show_desktop_icons};
 use eframe::egui::{self, Color32, CornerRadius, Id, Pos2, Rect, Vec2};
 use ewebsock::{WsEvent, WsMessage, WsReceiver, WsSender};
 use inspectors::{InspectorSpawnRequest, ScopeFilter, StateFilter};
 use kaage_proto::{
-    ClientMsg, ContainerInfo, HostMetrics, NixosInfo, ServerMsg, SystemdUnitInfo, SystemdUnitStatus,
+    ClientMsg, ContainerInfo, DashboardSnapshot, HostMetrics, NixosInfo, ServerMsg,
+    SystemdUnitInfo, SystemdUnitStatus,
 };
 use terminal::TerminalPane;
 use theme::{
-    BEOS_DESKTOP_BLUE, BEOS_PANEL_GRAY, BEOS_STATUS_GREEN, BEOS_STATUS_RED, apply_beos_style,
-    draw_beos_bevel,
+    BEOS_DESKTOP_BLUE, BEOS_PANEL_GRAY, BEOS_STATUS_GREEN, BEOS_STATUS_RED, TOPBAR_HEIGHT,
+    apply_beos_style, draw_beos_bevel,
 };
+use tracker::{BeTrackerSidebar, TrackerAction};
 use wm::{BeWindowManager, PaneKind};
 
 const WALLPAPER_BYTES: &[u8] = include_bytes!("../../../assets/kaage-wallpaper.jpg");
+const MAX_HISTORY_SAMPLES: usize = 60;
 
 struct ToastNotice {
     ok: bool,
@@ -33,8 +41,12 @@ struct KaageApp {
     wallpaper: Option<egui::TextureHandle>,
     wm: BeWindowManager,
     deskbar: BeDeskbar,
+    tracker: BeTrackerSidebar,
     nixos: Option<NixosInfo>,
     metrics: Option<HostMetrics>,
+    dashboard: Option<DashboardSnapshot>,
+    cpu_history: Vec<f32>,
+    mem_history: Vec<f32>,
     units: Vec<SystemdUnitInfo>,
     selected_unit_status: Option<SystemdUnitStatus>,
     containers: Vec<ContainerInfo>,
@@ -68,24 +80,37 @@ impl KaageApp {
         )
         .expect("Failed to open WebSocket connection");
 
+        let tracker = BeTrackerSidebar::new();
+        let stage_x = tracker.width() + 24.0;
+
         let mut wm = BeWindowManager::new();
-        wm.open_window(
+        let main_gid = wm.open_window(
             "Systemd Services".into(),
             PaneKind::SystemdInspector {
                 filter: String::new(),
                 scope_filter: ScopeFilter::All,
                 state_filter: StateFilter::All,
             },
-            Pos2::new(24.0, 24.0),
-            Vec2::new(680.0, 420.0),
+            Pos2::new(stage_x, TOPBAR_HEIGHT + 12.0),
+            Vec2::new(720.0, 420.0),
         );
+        wm.add_tab_to_group(main_gid, "GPU / CPU / Mem".into(), PaneKind::SystemMonitor);
+        wm.add_tab_to_group(main_gid, "AI Jobs".into(), PaneKind::AiJobs);
+        wm.add_tab_to_group(
+            main_gid,
+            "HTTP Ports".into(),
+            PaneKind::HttpPorts {
+                filter: String::new(),
+            },
+        );
+        wm.add_tab_to_group(main_gid, "Tailscale".into(), PaneKind::TailscalePanel);
 
         let initial_pty = 1;
         wm.open_window(
             "Terminal — shell".into(),
             PaneKind::Terminal(TerminalPane::new(initial_pty, 80, 24)),
-            Pos2::new(60.0, 465.0),
-            Vec2::new(680.0, 360.0),
+            Pos2::new(stage_x + 24.0, TOPBAR_HEIGHT + 464.0),
+            Vec2::new(700.0, 320.0),
         );
 
         Self {
@@ -95,8 +120,12 @@ impl KaageApp {
             wallpaper,
             wm,
             deskbar: BeDeskbar::new(),
+            tracker,
             nixos: None,
             metrics: None,
+            dashboard: None,
+            cpu_history: Vec::with_capacity(MAX_HISTORY_SAMPLES),
+            mem_history: Vec::with_capacity(MAX_HISTORY_SAMPLES),
             units: Vec::new(),
             selected_unit_status: None,
             containers: Vec::new(),
@@ -114,12 +143,22 @@ impl KaageApp {
     fn send_initial_sync(&mut self) {
         self.send_client_msg(ClientMsg::ListUnits);
         self.send_client_msg(ClientMsg::ListContainers);
+        self.send_client_msg(ClientMsg::RefreshDashboard);
         self.send_client_msg(ClientMsg::SpawnPty {
             session_id: 1,
             cols: 80,
             rows: 24,
             cmd: None,
         });
+    }
+
+    fn stage_origin(&self, offset_x: f32, offset_y: f32) -> Pos2 {
+        let base_x = if self.tracker.visible {
+            self.tracker.width() + 24.0
+        } else {
+            24.0
+        };
+        Pos2::new(base_x + offset_x, TOPBAR_HEIGHT + 16.0 + offset_y)
     }
 
     fn spawn_terminal_window(&mut self, title: String, cmd: Option<Vec<String>>) {
@@ -129,8 +168,11 @@ impl KaageApp {
         self.wm.open_window(
             title,
             PaneKind::Terminal(TerminalPane::new(session_id, 80, 24)),
-            Pos2::new(110.0 + (session_id as f32 * 18.0), 90.0),
-            Vec2::new(680.0, 410.0),
+            self.stage_origin(
+                18.0 + ((session_id % 6) as f32 * 22.0),
+                32.0 + ((session_id % 6) as f32 * 18.0),
+            ),
+            Vec2::new(680.0, 400.0),
         );
 
         self.send_client_msg(ClientMsg::SpawnPty {
@@ -140,12 +182,99 @@ impl KaageApp {
             cmd,
         });
     }
+
+    fn open_containers_window(&mut self) {
+        if !self
+            .wm
+            .focus_matching_tab(|k| matches!(k, PaneKind::DockerInspector { .. }))
+        {
+            self.wm.open_window(
+                "Containers".into(),
+                PaneKind::DockerInspector {
+                    filter: String::new(),
+                },
+                self.stage_origin(16.0, 24.0),
+                Vec2::new(560.0, 340.0),
+            );
+        }
+        self.send_client_msg(ClientMsg::ListContainers);
+    }
+
+    fn open_system_monitor(&mut self) {
+        if !self
+            .wm
+            .focus_matching_tab(|k| matches!(k, PaneKind::SystemMonitor))
+        {
+            self.wm.open_window(
+                "GPU / CPU / Mem".into(),
+                PaneKind::SystemMonitor,
+                self.stage_origin(20.0, 20.0),
+                Vec2::new(640.0, 460.0),
+            );
+        }
+        self.send_client_msg(ClientMsg::RefreshDashboard);
+    }
+
+    fn open_ai_jobs(&mut self) {
+        if !self
+            .wm
+            .focus_matching_tab(|k| matches!(k, PaneKind::AiJobs))
+        {
+            self.wm.open_window(
+                "AI Jobs".into(),
+                PaneKind::AiJobs,
+                self.stage_origin(36.0, 36.0),
+                Vec2::new(620.0, 400.0),
+            );
+        }
+        self.send_client_msg(ClientMsg::RefreshDashboard);
+    }
+
+    fn open_http_ports(&mut self) {
+        if !self
+            .wm
+            .focus_matching_tab(|k| matches!(k, PaneKind::HttpPorts { .. }))
+        {
+            self.wm.open_window(
+                "HTTP Ports".into(),
+                PaneKind::HttpPorts {
+                    filter: String::new(),
+                },
+                self.stage_origin(48.0, 48.0),
+                Vec2::new(640.0, 380.0),
+            );
+        }
+        self.send_client_msg(ClientMsg::RefreshDashboard);
+    }
+
+    fn open_tailscale(&mut self) {
+        if !self
+            .wm
+            .focus_matching_tab(|k| matches!(k, PaneKind::TailscalePanel))
+        {
+            self.wm.open_window(
+                "Tailscale".into(),
+                PaneKind::TailscalePanel,
+                self.stage_origin(60.0, 60.0),
+                Vec2::new(660.0, 420.0),
+            );
+        }
+        self.send_client_msg(ClientMsg::RefreshDashboard);
+    }
+
+    fn push_history(buf: &mut Vec<f32>, val: f32) {
+        if buf.len() >= MAX_HISTORY_SAMPLES {
+            buf.remove(0);
+        }
+        buf.push(val);
+    }
 }
 
 impl eframe::App for KaageApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
         let now = ctx.input(|i| i.time);
+        ctx.request_repaint_after(std::time::Duration::from_secs(1));
 
         while let Some(event) = self.ws_rx.try_recv() {
             match event {
@@ -168,7 +297,17 @@ impl eframe::App for KaageApp {
                     if let Ok(server_msg) = postcard::from_bytes::<ServerMsg>(&bytes) {
                         match server_msg {
                             ServerMsg::NixosInfo(info) => self.nixos = Some(info),
-                            ServerMsg::Metrics(m) => self.metrics = Some(m),
+                            ServerMsg::Metrics(m) => {
+                                Self::push_history(&mut self.cpu_history, m.cpu_percent);
+                                if m.mem_total_mb > 0 {
+                                    let pct = (m.mem_used_mb as f32 / m.mem_total_mb as f32) * 100.0;
+                                    Self::push_history(&mut self.mem_history, pct);
+                                }
+                                self.metrics = Some(m);
+                            }
+                            ServerMsg::Dashboard(d) => {
+                                self.dashboard = Some(d);
+                            }
                             ServerMsg::UnitsSnapshot(u) => self.units = u,
                             ServerMsg::UnitStatus(st) => self.selected_unit_status = Some(st),
                             ServerMsg::ContainersSnapshot(c) => self.containers = c,
@@ -212,6 +351,7 @@ impl eframe::App for KaageApp {
             }
         }
 
+        // Desktop Canvas + kaage Wallpaper
         egui::CentralPanel::default()
             .frame(egui::Frame::NONE.fill(BEOS_DESKTOP_BLUE))
             .show(ui, |ui| {
@@ -241,6 +381,81 @@ impl eframe::App for KaageApp {
                 }
             });
 
+        // Classic BeOS Desktop Icons (right edge)
+        if let Some(icon_act) = show_desktop_icons(&ctx) {
+            match icon_act {
+                DesktopIconAction::OpenHostServices => {
+                    self.wm.open_or_focus_systemd(
+                        ScopeFilter::All,
+                        StateFilter::All,
+                        self.tracker.width(),
+                    );
+                    self.send_client_msg(ClientMsg::ListUnits);
+                }
+                DesktopIconAction::OpenSystemMonitor => self.open_system_monitor(),
+                DesktopIconAction::OpenAiJobs => self.open_ai_jobs(),
+                DesktopIconAction::OpenHttpPorts => self.open_http_ports(),
+                DesktopIconAction::OpenTailscale => self.open_tailscale(),
+                DesktopIconAction::OpenTerminal => {
+                    self.spawn_terminal_window("Terminal — shell".into(), None);
+                }
+            }
+        }
+
+        // Left Floating Window: BeOS Tracker Sidebar
+        if let Some(tracker_act) = self.tracker.show(
+            &ctx,
+            self.nixos.as_ref(),
+            self.metrics.as_ref(),
+            &self.units,
+            &self.containers,
+            self.dashboard.as_ref(),
+            &self.wm.groups,
+        ) {
+            match tracker_act {
+                TrackerAction::Hide => {
+                    self.tracker.visible = false;
+                }
+                TrackerAction::NewTerminal => {
+                    self.spawn_terminal_window("Terminal — shell".into(), None);
+                }
+                TrackerAction::OpenServices { scope, state } => {
+                    self.wm
+                        .open_or_focus_systemd(scope, state, self.tracker.width());
+                    self.send_client_msg(ClientMsg::ListUnits);
+                }
+                TrackerAction::OpenContainers => self.open_containers_window(),
+                TrackerAction::OpenSystemMonitor => self.open_system_monitor(),
+                TrackerAction::OpenAiJobs => self.open_ai_jobs(),
+                TrackerAction::OpenHttpPorts => self.open_http_ports(),
+                TrackerAction::OpenTailscale => self.open_tailscale(),
+                TrackerAction::OpenJournal { user } => {
+                    let (title, cmd) = if user {
+                        (
+                            "journal — user".into(),
+                            vec![
+                                "journalctl".into(),
+                                "--user".into(),
+                                "-n".into(),
+                                "100".into(),
+                                "-f".into(),
+                            ],
+                        )
+                    } else {
+                        (
+                            "journal — system".into(),
+                            vec!["journalctl".into(), "-n".into(), "100".into(), "-f".into()],
+                        )
+                    };
+                    self.spawn_terminal_window(title, Some(cmd));
+                }
+                TrackerAction::FocusWindow { group_id, tab_idx } => {
+                    self.wm.focus_tab(group_id, tab_idx);
+                }
+            }
+        }
+
+        // Floating BeOS Windows
         let mut outbound = Vec::new();
         let spawn_reqs = self.wm.show(
             &ctx,
@@ -248,6 +463,9 @@ impl eframe::App for KaageApp {
             &self.units,
             &mut self.selected_unit_status,
             &self.containers,
+            self.dashboard.as_ref(),
+            &self.cpu_history,
+            &self.mem_history,
             &mut |msg| {
                 outbound.push(msg);
             },
@@ -264,44 +482,44 @@ impl eframe::App for KaageApp {
             }
         }
 
-        if let Some(action) =
-            self.deskbar
-                .show(&ctx, self.metrics.as_ref(), self.connected, &self.wm.groups)
-        {
+        // Full-Width Classic BeOS Topbar / Deskbar
+        if let Some(action) = self.deskbar.show(
+            &ctx,
+            self.nixos.as_ref(),
+            self.metrics.as_ref(),
+            &self.units,
+            self.connected,
+            self.tracker.visible,
+            &self.wm.groups,
+        ) {
             match action {
+                DeskbarAction::ToggleTracker => {
+                    self.tracker.visible = !self.tracker.visible;
+                }
+                DeskbarAction::TileWindows => {
+                    let screen = ctx.content_rect();
+                    self.wm.tile_windows(screen, self.tracker.width());
+                }
                 DeskbarAction::NewTerminal => {
                     self.spawn_terminal_window("Terminal — shell".into(), None);
                 }
-                DeskbarAction::OpenSystemdInspector => {
-                    self.wm.open_window(
-                        "Systemd Services".into(),
-                        PaneKind::SystemdInspector {
-                            filter: String::new(),
-                            scope_filter: ScopeFilter::All,
-                            state_filter: StateFilter::All,
-                        },
-                        Pos2::new(48.0, 48.0),
-                        Vec2::new(680.0, 420.0),
-                    );
+                DeskbarAction::OpenSystemdInspector { scope, state } => {
+                    self.wm
+                        .open_or_focus_systemd(scope, state, self.tracker.width());
                     self.send_client_msg(ClientMsg::ListUnits);
                 }
-                DeskbarAction::OpenDockerInspector => {
-                    self.wm.open_window(
-                        "Containers".into(),
-                        PaneKind::DockerInspector {
-                            filter: String::new(),
-                        },
-                        Pos2::new(84.0, 84.0),
-                        Vec2::new(540.0, 320.0),
-                    );
-                    self.send_client_msg(ClientMsg::ListContainers);
-                }
+                DeskbarAction::OpenDockerInspector => self.open_containers_window(),
+                DeskbarAction::OpenSystemMonitor => self.open_system_monitor(),
+                DeskbarAction::OpenAiJobs => self.open_ai_jobs(),
+                DeskbarAction::OpenHttpPorts => self.open_http_ports(),
+                DeskbarAction::OpenTailscale => self.open_tailscale(),
                 DeskbarAction::FocusWindow { group_id, tab_idx } => {
                     self.wm.focus_tab(group_id, tab_idx);
                 }
             }
         }
 
+        // Action Toast Notice (bottom-right)
         if let Some(toast) = &self.toast {
             if now < toast.expires_at {
                 let screen = ctx.content_rect();

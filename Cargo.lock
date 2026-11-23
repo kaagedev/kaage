@@ -2065,6 +2065,7 @@ dependencies = [
  "ewebsock",
  "ghostty-vt",
  "image",
+ "js-sys",
  "kaage-proto",
  "postcard",
  "serde",
