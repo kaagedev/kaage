@@ -1,7 +1,7 @@
 use crate::inspectors::InspectorSpawnRequest;
 use crate::theme::{
-    BEOS_BEVEL_DARK, BEOS_BEVEL_LIGHT, BEOS_BORDER_BLACK, BEOS_DESKTOP_BLUE, BEOS_LED_GOLD,
-    BEOS_LED_GREEN, BEOS_LED_RED, BEOS_STATUS_GREEN, BEOS_STATUS_RED, BEOS_TAB_YELLOW, be_button,
+    BEOS_BORDER_BLACK, BEOS_LED_GOLD, BEOS_LED_GREEN, BEOS_LED_RED, be_button, draw_beos_bevel,
+    palette,
 };
 use egui::{Color32, CornerRadius, Pos2, Rect, RichText, ScrollArea, Sense, Stroke, Ui, Vec2};
 use kaage_proto::{ClientMsg, DashboardSnapshot};
@@ -14,13 +14,14 @@ pub fn render_system_monitor(
     mem_history: &[f32],
     send_msg: &mut dyn FnMut(ClientMsg),
 ) -> Option<InspectorSpawnRequest> {
+    let pal = palette();
     let spawn_req = None;
 
     ui.horizontal(|ui| {
         ui.label(
             RichText::new("Host Compute: GPU · CPU · Memory")
                 .strong()
-                .color(crate::theme::text_color()),
+                .color(pal.text),
         );
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             if be_button(ui, "Refresh").clicked() {
@@ -34,7 +35,7 @@ pub fn render_system_monitor(
         ui.label(
             RichText::new("Collecting host telemetry...")
                 .italics()
-                .color(Color32::from_rgb(70, 70, 70)),
+                .color(pal.text_muted),
         );
         return spawn_req;
     };
@@ -49,18 +50,18 @@ pub fn render_system_monitor(
                     RichText::new("No GPU metrics detected.")
                         .italics()
                         .size(11.5)
-                        .color(Color32::from_rgb(80, 80, 80)),
+                        .color(pal.text_muted),
                 );
             } else {
                 for gpu in &dash.gpus {
                     be_card(ui, |ui| {
                         ui.horizontal(|ui| {
-                            ui.label(RichText::new(&gpu.name).strong().color(crate::theme::text_color()));
+                            ui.label(RichText::new(&gpu.name).strong().color(pal.text));
                             ui.label(
                                 RichText::new(format!("[{}]", gpu.source))
                                     .monospace()
                                     .size(10.0)
-                                    .color(Color32::from_rgb(70, 90, 120)),
+                                    .color(pal.status_sky),
                             );
                         });
 
@@ -70,7 +71,7 @@ pub fn render_system_monitor(
                                 "GPU Util",
                                 util / 100.0,
                                 &format!("{util:.0}%"),
-                                BEOS_STATUS_GREEN,
+                                pal.status_green,
                             );
                         }
 
@@ -86,7 +87,7 @@ pub fn render_system_monitor(
                                     gpu.vram_total_mb as f32 / 1024.0,
                                     frac * 100.0
                                 ),
-                                BEOS_DESKTOP_BLUE,
+                                pal.status_sky,
                             );
                         }
 
@@ -106,7 +107,7 @@ pub fn render_system_monitor(
                                 RichText::new(extras.join("   •   "))
                                     .monospace()
                                     .size(11.0)
-                                    .color(Color32::from_rgb(55, 55, 55)),
+                                    .color(pal.text_muted),
                             );
                         }
                         if let Some(ref note) = gpu.note {
@@ -114,7 +115,7 @@ pub fn render_system_monitor(
                                 RichText::new(note)
                                     .size(10.5)
                                     .italics()
-                                    .color(Color32::from_rgb(120, 80, 20)),
+                                    .color(pal.status_amber),
                             );
                         }
                     });
@@ -132,7 +133,7 @@ pub fn render_system_monitor(
                     } else {
                         format!("{} ({} threads)", dash.cpu_brand, dash.cpu_cores.len())
                     };
-                    ui.label(RichText::new(brand).strong().size(11.5).color(crate::theme::text_color()));
+                    ui.label(RichText::new(brand).strong().size(11.5).color(pal.text));
                 });
                 progress_row(
                     ui,
@@ -142,11 +143,11 @@ pub fn render_system_monitor(
                         "{:.1}%  ·  load {:.2} / {:.2} / {:.2}",
                         dash.cpu_percent, dash.load_avg[0], dash.load_avg[1], dash.load_avg[2]
                     ),
-                    BEOS_STATUS_GREEN,
+                    pal.status_green,
                 );
 
                 if cpu_history.len() > 1 {
-                    draw_sparkline(ui, cpu_history, BEOS_STATUS_GREEN, "CPU History");
+                    draw_sparkline(ui, cpu_history, pal.status_green, "CPU History");
                 }
 
                 // Per-core compact mini bar grid
@@ -162,7 +163,7 @@ pub fn render_system_monitor(
                                 let (rect, _) =
                                     ui.allocate_exact_size(Vec2::new(cell_w, 12.0), Sense::hover());
                                 let p = ui.painter();
-                                p.rect_filled(rect, CornerRadius::ZERO, Color32::from_rgb(228, 228, 228));
+                                p.rect_filled(rect, CornerRadius::ZERO, pal.surface_alt);
                                 p.rect_filled(
                                     Rect::from_min_size(
                                         rect.min,
@@ -170,15 +171,15 @@ pub fn render_system_monitor(
                                     ),
                                     CornerRadius::ZERO,
                                     if usage > 80.0 {
-                                        BEOS_STATUS_RED
+                                        pal.status_red
                                     } else {
-                                        BEOS_STATUS_GREEN
+                                        pal.status_green
                                     },
                                 );
                                 p.rect_stroke(
                                     rect,
                                     CornerRadius::ZERO,
-                                    Stroke::new(1.0, BEOS_BORDER_BLACK),
+                                    Stroke::new(1.0, pal.border),
                                     egui::StrokeKind::Inside,
                                 );
                                 p.text(
@@ -186,7 +187,7 @@ pub fn render_system_monitor(
                                     egui::Align2::CENTER_CENTER,
                                     format!("{usage:.0}%"),
                                     egui::FontId::monospace(9.0),
-                                    crate::theme::text_color(),
+                                    pal.text,
                                 );
                             }
                         });
@@ -213,7 +214,7 @@ pub fn render_system_monitor(
                         dash.mem_total_mb as f32 / 1024.0,
                         mem_frac * 100.0
                     ),
-                    BEOS_TAB_YELLOW,
+                    pal.status_amber,
                 );
                 if dash.swap_total_mb > 0 {
                     let swap_frac =
@@ -232,7 +233,7 @@ pub fn render_system_monitor(
                     );
                 }
                 if mem_history.len() > 1 {
-                    draw_sparkline(ui, mem_history, Color32::from_rgb(200, 145, 0), "RAM History");
+                    draw_sparkline(ui, mem_history, pal.status_amber, "RAM History");
                 }
 
                 if !dash.top_processes.is_empty() {
@@ -241,7 +242,7 @@ pub fn render_system_monitor(
                         RichText::new("Top Memory Processes")
                             .strong()
                             .size(11.0)
-                            .color(Color32::from_rgb(50, 50, 50)),
+                            .color(pal.accent),
                     );
                     for p in &dash.top_processes {
                         ui.horizontal(|ui| {
@@ -249,15 +250,15 @@ pub fn render_system_monitor(
                                 RichText::new(format!("{:>6}", p.pid))
                                     .monospace()
                                     .size(10.5)
-                                    .color(Color32::from_rgb(85, 85, 85)),
+                                    .color(pal.text_muted),
                             );
-                            ui.label(RichText::new(&p.name).size(11.0).color(crate::theme::text_color()));
+                            ui.label(RichText::new(&p.name).size(11.0).color(pal.text));
                             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                                 ui.label(
                                     RichText::new(format!("{} MiB  |  CPU {:.1}%", p.mem_mb, p.cpu_percent))
                                         .monospace()
                                         .size(10.5)
-                                        .color(Color32::from_rgb(45, 45, 45)),
+                                        .color(pal.text),
                                 );
                             });
                         });
@@ -275,13 +276,14 @@ pub fn render_ai_jobs(
     dashboard: Option<&DashboardSnapshot>,
     send_msg: &mut dyn FnMut(ClientMsg),
 ) -> Option<InspectorSpawnRequest> {
+    let pal = palette();
     let mut spawn_req = None;
 
     ui.horizontal(|ui| {
         ui.label(
             RichText::new("AI Workloads: ComfyUI · Unsloth Studio")
                 .strong()
-                .color(crate::theme::text_color()),
+                .color(pal.text),
         );
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             if be_button(ui, "Refresh").clicked() {
@@ -295,7 +297,7 @@ pub fn render_ai_jobs(
         ui.label(
             RichText::new("Querying ComfyUI and Unsloth Studio...")
                 .italics()
-                .color(Color32::from_rgb(70, 70, 70)),
+                .color(pal.text_muted),
         );
         return None;
     };
@@ -317,13 +319,13 @@ pub fn render_ai_jobs(
                     ui.label(
                         RichText::new(format!("ComfyUI{ver}"))
                             .strong()
-                            .color(crate::theme::text_color()),
+                            .color(pal.text),
                     );
                     ui.label(
                         RichText::new(&c.url)
                             .monospace()
                             .size(10.5)
-                            .color(Color32::from_rgb(75, 75, 75)),
+                            .color(pal.text_muted),
                     );
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if be_button(ui, "Logs").clicked() {
@@ -347,7 +349,7 @@ pub fn render_ai_jobs(
                     ui.label(
                         RichText::new(format!("Offline: {err}"))
                             .size(11.0)
-                            .color(BEOS_STATUS_RED),
+                            .color(pal.status_red),
                     );
                 } else {
                     ui.label(
@@ -357,14 +359,14 @@ pub fn render_ai_jobs(
                             c.pending_jobs.len()
                         ))
                         .size(11.5)
-                        .color(crate::theme::text_color()),
+                        .color(pal.text),
                     );
                     if c.running_jobs.is_empty() && c.pending_jobs.is_empty() {
                         ui.label(
                             RichText::new("Queue is idle — no active or pending ComfyUI jobs.")
                                 .italics()
                                 .size(11.0)
-                                .color(Color32::from_rgb(80, 80, 80)),
+                                .color(pal.text_muted),
                         );
                     } else {
                         for job in c.running_jobs.iter().chain(c.pending_jobs.iter()) {
@@ -375,12 +377,12 @@ pub fn render_ai_jobs(
                                     BEOS_LED_GOLD
                                 };
                                 status_led(ui, col);
-                                ui.label(RichText::new(&job.title).strong().size(11.5).color(crate::theme::text_color()));
+                                ui.label(RichText::new(&job.title).strong().size(11.5).color(pal.text));
                                 ui.label(
                                     RichText::new(format!("[{}] {}", job.state, job.detail))
                                         .monospace()
                                         .size(10.5)
-                                        .color(Color32::from_rgb(65, 65, 65)),
+                                        .color(pal.text_muted),
                                 );
                             });
                         }
@@ -399,13 +401,13 @@ pub fn render_ai_jobs(
                     ui.label(
                         RichText::new(&u.service_name)
                             .strong()
-                            .color(crate::theme::text_color()),
+                            .color(pal.text),
                     );
                     ui.label(
                         RichText::new(&u.url)
                             .monospace()
                             .size(10.5)
-                            .color(Color32::from_rgb(75, 75, 75)),
+                            .color(pal.text_muted),
                     );
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if be_button(ui, "Logs").clicked() {
@@ -429,7 +431,7 @@ pub fn render_ai_jobs(
                     ui.label(
                         RichText::new(format!("API unreachable: {err}"))
                             .size(11.0)
-                            .color(BEOS_STATUS_RED),
+                            .color(pal.status_red),
                     );
                 }
                 if u.jobs.is_empty() {
@@ -437,7 +439,7 @@ pub fn render_ai_jobs(
                         RichText::new("No active Unsloth jobs or worker processes detected.")
                             .italics()
                             .size(11.0)
-                            .color(Color32::from_rgb(80, 80, 80)),
+                            .color(pal.text_muted),
                     );
                 } else {
                     for job in &u.jobs {
@@ -452,15 +454,15 @@ pub fn render_ai_jobs(
                                 RichText::new(&job.id)
                                     .monospace()
                                     .size(10.5)
-                                    .color(Color32::from_rgb(80, 80, 80)),
+                                    .color(pal.text_muted),
                             );
-                            ui.label(RichText::new(&job.title).strong().size(11.5).color(crate::theme::text_color()));
+                            ui.label(RichText::new(&job.title).strong().size(11.5).color(pal.text));
                             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                                 ui.label(
                                     RichText::new(&job.detail)
                                         .monospace()
                                         .size(10.5)
-                                        .color(Color32::from_rgb(55, 55, 55)),
+                                        .color(pal.text_muted),
                                 );
                             });
                         });
@@ -479,8 +481,9 @@ pub fn render_http_ports(
     dashboard: Option<&DashboardSnapshot>,
     send_msg: &mut dyn FnMut(ClientMsg),
 ) {
+    let pal = palette();
     ui.horizontal(|ui| {
-        ui.label(RichText::new("Filter:").color(crate::theme::text_color()));
+        ui.label(RichText::new("Filter:").color(pal.text));
         ui.add(egui::TextEdit::singleline(filter).desired_width(160.0));
         if be_button(ui, "Refresh").clicked() {
             send_msg(ClientMsg::RefreshDashboard);
@@ -492,7 +495,7 @@ pub fn render_http_ports(
         ui.label(
             RichText::new("Scanning listening ports...")
                 .italics()
-                .color(Color32::from_rgb(70, 70, 70)),
+                .color(pal.text_muted),
         );
         return;
     };
@@ -532,9 +535,9 @@ pub fn render_http_ports(
                                 .monospace()
                                 .strong()
                                 .size(12.5)
-                                .color(BEOS_DESKTOP_BLUE),
+                                .color(pal.status_sky),
                         );
-                        ui.label(RichText::new(&p.label).strong().color(crate::theme::text_color()));
+                        ui.label(RichText::new(&p.label).strong().color(pal.text));
                         if !p.process.is_empty() {
                             let pid_part = p
                                 .pid
@@ -544,7 +547,7 @@ pub fn render_http_ports(
                                 RichText::new(format!("{}{pid_part}", p.process))
                                     .monospace()
                                     .size(10.5)
-                                    .color(Color32::from_rgb(75, 75, 75)),
+                                    .color(pal.text_muted),
                             );
                         }
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -552,7 +555,7 @@ pub fn render_http_ports(
                                 RichText::new(&p.bind_addr)
                                     .monospace()
                                     .size(10.5)
-                                    .color(Color32::from_rgb(80, 80, 80)),
+                                    .color(pal.text_muted),
                             );
                         });
                     });
@@ -561,7 +564,7 @@ pub fn render_http_ports(
                             RichText::new(format!("Tailscale HTTPS: {url}"))
                                 .monospace()
                                 .size(10.5)
-                                .color(BEOS_STATUS_GREEN),
+                                .color(pal.status_green),
                         );
                     }
                 });
@@ -571,7 +574,7 @@ pub fn render_http_ports(
                 ui.label(
                     RichText::new("No matching listening ports.")
                         .italics()
-                        .color(Color32::from_rgb(80, 80, 80)),
+                        .color(pal.text_muted),
                 );
             }
         });
@@ -583,11 +586,12 @@ pub fn render_tailscale_panel(
     dashboard: Option<&DashboardSnapshot>,
     send_msg: &mut dyn FnMut(ClientMsg),
 ) {
+    let pal = palette();
     ui.horizontal(|ui| {
         ui.label(
             RichText::new("Tailscale Mesh & Serve Status")
                 .strong()
-                .color(crate::theme::text_color()),
+                .color(pal.text),
         );
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             if be_button(ui, "Refresh").clicked() {
@@ -601,7 +605,7 @@ pub fn render_tailscale_panel(
         ui.label(
             RichText::new("Querying Tailscale daemon...")
                 .italics()
-                .color(Color32::from_rgb(70, 70, 70)),
+                .color(pal.text_muted),
         );
         return;
     };
@@ -613,7 +617,7 @@ pub fn render_tailscale_panel(
                 "Tailscale unavailable: {}",
                 ts.error.as_deref().unwrap_or("not running")
             ))
-            .color(BEOS_STATUS_RED),
+            .color(pal.status_red),
         );
         return;
     }
@@ -630,13 +634,13 @@ pub fn render_tailscale_panel(
                     ui.label(
                         RichText::new(format!("{}  ({})", ts.hostname, ts.backend_state))
                             .strong()
-                            .color(crate::theme::text_color()),
+                            .color(pal.text),
                     );
                     ui.label(
                         RichText::new(format!("v{}", ts.version))
                             .monospace()
                             .size(10.5)
-                            .color(Color32::from_rgb(75, 75, 75)),
+                            .color(pal.text_muted),
                     );
                 });
                 if !ts.dns_name.is_empty() {
@@ -644,7 +648,7 @@ pub fn render_tailscale_panel(
                         RichText::new(format!("MagicDNS: {}", ts.dns_name))
                             .monospace()
                             .size(11.0)
-                            .color(BEOS_DESKTOP_BLUE),
+                            .color(pal.status_sky),
                     );
                 }
                 if !ts.tailscale_ips.is_empty() {
@@ -656,7 +660,7 @@ pub fn render_tailscale_panel(
                         ))
                         .monospace()
                         .size(10.5)
-                        .color(Color32::from_rgb(55, 55, 55)),
+                        .color(pal.text_muted),
                     );
                 }
             });
@@ -670,7 +674,7 @@ pub fn render_tailscale_panel(
                         RichText::new("No active tailscale serve routes.")
                             .italics()
                             .size(11.0)
-                            .color(Color32::from_rgb(80, 80, 80)),
+                            .color(pal.text_muted),
                     );
                 } else {
                     for s in &ts.serves {
@@ -680,14 +684,14 @@ pub fn render_tailscale_panel(
                                 RichText::new(&s.https_url)
                                     .monospace()
                                     .size(11.0)
-                                    .color(BEOS_DESKTOP_BLUE),
+                                    .color(pal.status_sky),
                             );
-                            ui.label(RichText::new("→").color(Color32::from_rgb(90, 90, 90)));
+                            ui.label(RichText::new("→").color(pal.text_muted));
                             ui.label(
                                 RichText::new(&s.target)
                                     .monospace()
                                     .size(10.5)
-                                    .color(Color32::from_rgb(55, 55, 55)),
+                                    .color(pal.text),
                             );
                         });
                     }
@@ -707,7 +711,7 @@ pub fn render_tailscale_panel(
                         RichText::new("No peers reported.")
                             .italics()
                             .size(11.0)
-                            .color(Color32::from_rgb(80, 80, 80)),
+                            .color(pal.text_muted),
                     );
                 } else {
                     for peer in &ts.peers {
@@ -715,26 +719,26 @@ pub fn render_tailscale_panel(
                             let led = if peer.online {
                                 BEOS_LED_GREEN
                             } else {
-                                Color32::from_rgb(160, 160, 160)
+                                Color32::from_rgb(130, 138, 150)
                             };
                             status_led(ui, led);
                             ui.label(
                                 RichText::new(&peer.hostname)
                                     .strong()
                                     .size(11.5)
-                                    .color(crate::theme::text_color()),
+                                    .color(pal.text),
                             );
                             ui.label(
                                 RichText::new(format!("[{}]", peer.os))
                                     .monospace()
                                     .size(10.0)
-                                    .color(Color32::from_rgb(80, 80, 80)),
+                                    .color(pal.text_muted),
                             );
                             ui.label(
                                 RichText::new(&peer.tailscale_ip)
                                     .monospace()
                                     .size(10.5)
-                                    .color(Color32::from_rgb(55, 55, 55)),
+                                    .color(pal.text),
                             );
                             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                                 let relay = if peer.relay.is_empty() {
@@ -750,7 +754,7 @@ pub fn render_tailscale_panel(
                                     ))
                                     .monospace()
                                     .size(10.0)
-                                    .color(Color32::from_rgb(75, 75, 75)),
+                                    .color(pal.text_muted),
                                 );
                             });
                         });
@@ -804,44 +808,43 @@ fn status_led(ui: &mut Ui, color: Color32) {
 }
 
 fn progress_row(ui: &mut Ui, label: &str, frac: f32, value_text: &str, fill: Color32) {
+    let pal = palette();
     ui.horizontal(|ui| {
         ui.label(
             RichText::new(format!("{label:<9}"))
                 .monospace()
                 .size(11.0)
-                .color(crate::theme::text_color()),
+                .color(pal.text),
         );
         let bar_w = 150.0_f32.min((ui.available_width() - 160.0).max(80.0));
         let (rect, _) = ui.allocate_exact_size(Vec2::new(bar_w, 13.0), Sense::hover());
         let p = ui.painter();
-        p.rect_filled(rect, CornerRadius::ZERO, Color32::from_rgb(230, 230, 230));
+        p.rect_filled(rect, CornerRadius::ZERO, pal.surface_alt);
         p.rect_filled(
             Rect::from_min_size(rect.min, Vec2::new(rect.width() * frac.clamp(0.0, 1.0), rect.height())),
             CornerRadius::ZERO,
             fill,
         );
-        p.line_segment([rect.left_top(), rect.right_top()], Stroke::new(1.0, BEOS_BEVEL_DARK));
-        p.line_segment([rect.left_top(), rect.left_bottom()], Stroke::new(1.0, BEOS_BEVEL_DARK));
-        p.line_segment([rect.left_bottom(), rect.right_bottom()], Stroke::new(1.0, BEOS_BEVEL_LIGHT));
-        p.line_segment([rect.right_top(), rect.right_bottom()], Stroke::new(1.0, BEOS_BEVEL_LIGHT));
+        draw_beos_bevel(p, rect, true);
         ui.label(
             RichText::new(value_text)
                 .monospace()
                 .size(11.0)
-                .color(Color32::from_rgb(35, 35, 35)),
+                .color(pal.text),
         );
     });
 }
 
 fn draw_sparkline(ui: &mut Ui, samples: &[f32], color: Color32, title: &str) {
+    let pal = palette();
     let w = ui.available_width();
     let (rect, _) = ui.allocate_exact_size(Vec2::new(w, 34.0), Sense::hover());
     let p = ui.painter();
-    p.rect_filled(rect, CornerRadius::ZERO, Color32::from_rgb(245, 247, 250));
+    p.rect_filled(rect, CornerRadius::ZERO, pal.surface);
     p.rect_stroke(
         rect,
         CornerRadius::ZERO,
-        Stroke::new(1.0, BEOS_BEVEL_DARK),
+        Stroke::new(1.0, pal.border),
         egui::StrokeKind::Inside,
     );
     let n = samples.len();
@@ -862,7 +865,7 @@ fn draw_sparkline(ui: &mut Ui, samples: &[f32], color: Color32, title: &str) {
         egui::Align2::LEFT_TOP,
         title,
         egui::FontId::proportional(9.5),
-        Color32::from_rgb(100, 100, 100),
+        pal.text_muted,
     );
 }
 

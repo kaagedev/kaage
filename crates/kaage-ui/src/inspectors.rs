@@ -1,5 +1,5 @@
-use crate::theme::{BEOS_STATUS_GREEN, BEOS_STATUS_RED, be_button, be_toggle_button};
-use egui::{Color32, RichText, ScrollArea, Ui};
+use crate::theme::{be_button, be_toggle_button, palette};
+use egui::{RichText, ScrollArea, Ui};
 use kaage_proto::{
     ClientMsg, ContainerAction, ContainerInfo, NixosInfo, SystemdUnitInfo, SystemdUnitStatus,
     UnitAction, UnitScope,
@@ -38,6 +38,7 @@ pub fn render_systemd_inspector(
     selected_status: &mut Option<SystemdUnitStatus>,
     send_msg: &mut dyn FnMut(ClientMsg),
 ) -> Option<InspectorSpawnRequest> {
+    let pal = palette();
     let mut spawn_req = None;
 
     let total_count = units.len();
@@ -56,14 +57,14 @@ pub fn render_systemd_inspector(
                 RichText::new(format!("{}{gen_str}", info.pretty_name))
                     .strong()
                     .size(11.5)
-                    .color(Color32::from_rgb(30, 70, 120)),
+                    .color(pal.status_sky),
             );
             ui.label(
                 RichText::new(format!(
                     "• {running_count} running • {enabled_count} enabled • {total_count} services"
                 ))
                 .size(11.0)
-                .color(Color32::from_rgb(60, 60, 60)),
+                .color(pal.text_muted),
             );
         });
         ui.separator();
@@ -154,13 +155,13 @@ pub fn render_systemd_inspector(
 
                 ui.horizontal(|ui| {
                     let state_color = if unit.running {
-                        BEOS_STATUS_GREEN
+                        pal.status_green
                     } else if unit.active_state == "active" {
-                        Color32::from_rgb(184, 134, 11)
+                        pal.status_amber
                     } else if unit.active_state == "failed" {
-                        BEOS_STATUS_RED
+                        pal.status_red
                     } else {
-                        Color32::from_rgb(115, 115, 115)
+                        pal.text_muted
                     };
                     ui.label(RichText::new("●").color(state_color));
 
@@ -172,7 +173,7 @@ pub fn render_systemd_inspector(
                         RichText::new(format!("[{scope_tag}]"))
                             .monospace()
                             .size(10.5)
-                            .color(crate::theme::muted_text_color()),
+                            .color(pal.text_muted),
                     );
 
                     if unit.nixos_managed {
@@ -180,24 +181,24 @@ pub fn render_systemd_inspector(
                             RichText::new("[nix]")
                                 .monospace()
                                 .size(10.0)
-                                .color(Color32::from_rgb(51, 102, 152)),
+                                .color(pal.status_sky),
                         );
                     }
 
-                    ui.label(RichText::new(&unit.name).strong().color(crate::theme::text_color()));
+                    ui.label(RichText::new(&unit.name).strong().color(pal.text));
                     ui.label(
                         RichText::new(format!("({})", unit.sub_state))
                             .size(11.0)
-                            .color(crate::theme::muted_text_color()),
+                            .color(pal.text_muted),
                     );
 
                     if !unit.unit_file_state.is_empty() {
                         let file_state_color = if unit.enabled {
-                            BEOS_STATUS_GREEN
+                            pal.status_green
                         } else if unit.unit_file_state == "masked" {
-                            BEOS_STATUS_RED
+                            pal.status_red
                         } else {
-                            Color32::from_rgb(95, 95, 95)
+                            pal.text_muted
                         };
                         ui.label(
                             RichText::new(&unit.unit_file_state)
@@ -262,7 +263,7 @@ pub fn render_systemd_inspector(
                 ui.label(
                     RichText::new("No matching systemd services.")
                         .italics()
-                        .color(Color32::from_rgb(80, 80, 80)),
+                        .color(pal.text_muted),
                 );
             }
         });
@@ -352,14 +353,14 @@ pub fn render_systemd_inspector(
                         RichText::new(format!("NixOS unit: {store}"))
                             .monospace()
                             .size(10.0)
-                            .color(Color32::from_rgb(51, 102, 152)),
+                            .color(pal.status_sky),
                     );
                 } else if !st.fragment_path.is_empty() {
                     ui.label(
                         RichText::new(format!("Unit file: {}", st.fragment_path))
                             .monospace()
                             .size(10.0)
-                            .color(Color32::from_rgb(80, 80, 80)),
+                            .color(pal.text_muted),
                     );
                 }
 
@@ -389,10 +390,11 @@ pub fn render_docker_inspector(
     containers: &[ContainerInfo],
     send_msg: &mut dyn FnMut(ClientMsg),
 ) -> Option<InspectorSpawnRequest> {
+    let pal = palette();
     let mut spawn_req = None;
 
     ui.horizontal(|ui| {
-        ui.label(RichText::new("Filter:").color(crate::theme::text_color()));
+        ui.label(RichText::new("Filter:").color(pal.text));
         ui.text_edit_singleline(filter);
         if be_button(ui, "Refresh").clicked() {
             send_msg(ClientMsg::ListContainers);
@@ -415,13 +417,13 @@ pub fn render_docker_inspector(
 
             ui.horizontal(|ui| {
                 let state_color = if ctr.state == "running" {
-                    BEOS_STATUS_GREEN
+                    pal.status_green
                 } else {
-                    BEOS_STATUS_RED
+                    pal.status_red
                 };
                 ui.label(RichText::new("■").color(state_color));
-                ui.label(RichText::new(&ctr.name).strong().color(crate::theme::text_color()));
-                ui.label(RichText::new(&ctr.image).color(Color32::from_rgb(75, 75, 75)));
+                ui.label(RichText::new(&ctr.name).strong().color(pal.text));
+                ui.label(RichText::new(&ctr.image).color(pal.text_muted));
 
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if ctr.state == "running" {
@@ -472,7 +474,7 @@ pub fn render_docker_inspector(
             ui.label(
                 RichText::new("No containers detected.")
                     .italics()
-                    .color(Color32::from_rgb(80, 80, 80)),
+                    .color(pal.text_muted),
             );
         }
     });

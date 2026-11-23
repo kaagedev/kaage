@@ -1,6 +1,6 @@
 use crate::theme::{
-    BEOS_DESKTOP_BLUE, BEOS_LED_GOLD, BEOS_LED_GREEN, BEOS_LED_RED, BEOS_STATUS_GREEN,
-    BEOS_STATUS_RED, BEOS_TAB_YELLOW, be_button, be_toggle_button, draw_beos_bevel,
+    BEOS_LED_GOLD, BEOS_LED_GREEN, BEOS_LED_RED, BEOS_TAB_YELLOW, be_button, be_toggle_button,
+    draw_beos_bevel,
 };
 use egui::{
     Color32, CornerRadius, Pos2, Rect, RichText, ScrollArea, Sense, Stroke, Ui, Vec2,
@@ -165,11 +165,12 @@ impl VitalsWindow {
         });
         ui.separator();
 
+        let pal = crate::theme::palette();
         let Some(snap) = self.snapshot.clone() else {
             ui.label(
                 RichText::new("Loading Vitals telemetry history...")
                     .italics()
-                    .color(Color32::from_rgb(70, 70, 70)),
+                    .color(pal.text_muted),
             );
             return None;
         };
@@ -197,20 +198,25 @@ impl VitalsWindow {
                             fmt_span(snap.history_span_secs)
                         ))
                         .size(10.5)
-                        .color(Color32::from_rgb(65, 65, 65)),
+                        .color(pal.text_muted),
                     );
                 });
 
                 for alert in &snap.alerts {
+                    let alert_bg = if pal.is_dark {
+                        Color32::from_rgba_unmultiplied(248, 113, 113, 35)
+                    } else {
+                        Color32::from_rgb(249, 216, 216)
+                    };
                     egui::Frame::NONE
-                        .fill(Color32::from_rgb(249, 216, 216))
-                        .stroke(Stroke::new(1.0, BEOS_STATUS_RED))
+                        .fill(alert_bg)
+                        .stroke(Stroke::new(1.0, pal.status_red))
                         .inner_margin(4.0)
                         .show(ui, |ui| {
                             ui.label(
                                 RichText::new(format!("⚠ {alert}"))
                                     .size(11.0)
-                                    .color(BEOS_STATUS_RED),
+                                    .color(pal.status_red),
                             );
                         });
                 }
@@ -428,7 +434,7 @@ impl VitalsWindow {
                         RichText::new("STORAGE MOUNTS")
                             .strong()
                             .size(10.5)
-                            .color(Color32::from_rgb(45, 55, 70)),
+                            .color(pal.accent),
                     );
                     for m in snap.mounts.iter().take(5) {
                         let frac = if m.total_gb > 0.0 {
@@ -451,7 +457,7 @@ impl VitalsWindow {
                         RichText::new("NETWORK INTERFACES")
                             .strong()
                             .size(10.5)
-                            .color(Color32::from_rgb(45, 55, 70)),
+                            .color(pal.accent),
                     );
                     for nic in snap.nics.iter().take(6) {
                         cols[1].horizontal(|ui| {
@@ -462,9 +468,9 @@ impl VitalsWindow {
                                     .strong()
                                     .size(11.0)
                                     .color(if nic.is_tailscale {
-                                        BEOS_DESKTOP_BLUE
+                                        pal.status_sky
                                     } else {
-                                        crate::theme::text_color()
+                                        pal.text
                                     }),
                             );
                             ui.label(
@@ -474,7 +480,7 @@ impl VitalsWindow {
                                 ))
                                 .monospace()
                                 .size(10.5)
-                                .color(Color32::from_rgb(55, 55, 55)),
+                                .color(pal.text_muted),
                             );
                         });
                     }
@@ -600,7 +606,7 @@ fn render_beos_chart(
                         RichText::new(callout)
                             .monospace()
                             .size(10.0)
-                            .color(BEOS_DESKTOP_BLUE),
+                            .color(pal.status_sky),
                     );
                 });
             });
@@ -811,18 +817,19 @@ fn render_process_row(
     p: &ProcessVital,
     send_msg: &mut dyn FnMut(ClientMsg),
 ) -> Option<VitalsSpawnRequest> {
+    let pal = crate::theme::palette();
     let mut spawn_req = None;
     ui.horizontal(|ui| {
         ui.label(
             RichText::new(format!("{:>6}", p.pid))
                 .monospace()
                 .size(10.5)
-                .color(Color32::from_rgb(80, 80, 80)),
+                .color(pal.text_muted),
         );
-        ui.label(RichText::new(&p.name).strong().size(11.0).color(crate::theme::text_color()));
+        ui.label(RichText::new(&p.name).strong().size(11.0).color(pal.text));
         if let Some(ref unit) = p.unit
             && ui
-                .small_button(RichText::new(format!("● {unit}")).size(10.0).color(BEOS_STATUS_GREEN))
+                .small_button(RichText::new(format!("● {unit}")).size(10.0).color(pal.status_green))
                 .clicked()
         {
             spawn_req = Some(VitalsSpawnRequest::OpenUnitLogs { unit: unit.clone() });
@@ -862,7 +869,7 @@ fn render_process_row(
                 ))
                 .monospace()
                 .size(10.5)
-                .color(Color32::from_rgb(45, 45, 45)),
+                .color(pal.text),
             );
         });
     });

@@ -1,5 +1,118 @@
-use egui::{Color32, CornerRadius, Pos2, Rect, Response, Sense, Stroke, Ui, Vec2};
+use egui::{
+    Color32, CornerRadius, FontData, FontDefinitions, FontFamily, FontId, Pos2, Rect, Response,
+    Sense, Stroke, TextStyle, Ui, Vec2,
+};
 use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::{Arc, OnceLock, RwLock};
+
+const IBM_PLEX_SANS_BYTES: &[u8] = include_bytes!("../../../assets/fonts/IBMPlexSans-Regular.ttf");
+const IBM_PLEX_MONO_BYTES: &[u8] = include_bytes!("../../../assets/fonts/IBMPlexMono-Regular.ttf");
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FontPreset {
+    IbmPlex,
+    IbmPlexMonoAll,
+    EguiDefault,
+}
+
+impl FontPreset {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::IbmPlex => "IBM Plex Sans + Mono",
+            Self::IbmPlexMonoAll => "IBM Plex Mono Everywhere",
+            Self::EguiDefault => "egui Default",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct UserSettings {
+    pub theme_mode: ThemeMode,
+    pub palette: ThemePalette,
+    pub font_preset: FontPreset,
+    pub ui_scale: f32,
+    pub base_font_size: f32,
+    pub terminal_font_size: f32,
+}
+
+impl Default for UserSettings {
+    fn default() -> Self {
+        Self {
+            theme_mode: ThemeMode::ObsidianAmber,
+            palette: preset_palette(ThemeMode::ObsidianAmber),
+            font_preset: FontPreset::IbmPlex,
+            ui_scale: 1.0,
+            base_font_size: 13.0,
+            terminal_font_size: 14.0,
+        }
+    }
+}
+
+static USER_SETTINGS: OnceLock<RwLock<UserSettings>> = OnceLock::new();
+
+fn settings_lock() -> &'static RwLock<UserSettings> {
+    USER_SETTINGS.get_or_init(|| RwLock::new(UserSettings::default()))
+}
+
+pub fn user_settings() -> UserSettings {
+    *settings_lock()
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+}
+
+pub fn terminal_font_size() -> f32 {
+    user_settings().terminal_font_size.clamp(10.0, 22.0)
+}
+
+/// Register the IBM Plex font family according to the active `FontPreset`.
+/// Preserves egui's built-in fallback fonts behind IBM Plex so symbols/glyphs always render.
+pub fn configure_fonts_for_preset(ctx: &egui::Context, preset: FontPreset) {
+    let mut fonts = FontDefinitions::default();
+    match preset {
+        FontPreset::IbmPlex => {
+            fonts.font_data.insert(
+                "ibm_plex_sans".to_owned(),
+                Arc::new(FontData::from_static(IBM_PLEX_SANS_BYTES)),
+            );
+            fonts.font_data.insert(
+                "ibm_plex_mono".to_owned(),
+                Arc::new(FontData::from_static(IBM_PLEX_MONO_BYTES)),
+            );
+            fonts
+                .families
+                .entry(FontFamily::Proportional)
+                .or_default()
+                .insert(0, "ibm_plex_sans".to_owned());
+            fonts
+                .families
+                .entry(FontFamily::Monospace)
+                .or_default()
+                .insert(0, "ibm_plex_mono".to_owned());
+        }
+        FontPreset::IbmPlexMonoAll => {
+            fonts.font_data.insert(
+                "ibm_plex_mono".to_owned(),
+                Arc::new(FontData::from_static(IBM_PLEX_MONO_BYTES)),
+            );
+            fonts
+                .families
+                .entry(FontFamily::Proportional)
+                .or_default()
+                .insert(0, "ibm_plex_mono".to_owned());
+            fonts
+                .families
+                .entry(FontFamily::Monospace)
+                .or_default()
+                .insert(0, "ibm_plex_mono".to_owned());
+        }
+        FontPreset::EguiDefault => {}
+    }
+    ctx.set_fonts(fonts);
+}
+
+pub fn configure_fonts(ctx: &egui::Context) {
+    configure_fonts_for_preset(ctx, user_settings().font_preset);
+}
 
 // Legacy BeOS constants kept for compatibility & Retro BeOS mode
 pub const BEOS_DESKTOP_BLUE: Color32 = Color32::from_rgb(51, 102, 152);
@@ -77,31 +190,31 @@ pub struct ThemePalette {
     pub hover_row: Color32,
 }
 
-pub fn palette() -> ThemePalette {
-    match current_theme_mode() {
+pub fn preset_palette(mode: ThemeMode) -> ThemePalette {
+    match mode {
         ThemeMode::ObsidianAmber => ThemePalette {
             is_dark: true,
-            canvas_bg: Color32::from_rgb(13, 15, 18),      // #0D0F12
-            dot_grid: Color32::from_rgb(34, 40, 50),       // subtle 24px dot-grid
-            surface: Color32::from_rgb(22, 25, 30),        // #16191E
-            surface_alt: Color32::from_rgb(31, 36, 45),    // #1F242D
-            well: Color32::from_rgb(18, 20, 24),           // #121418
-            widget: Color32::from_rgb(31, 36, 45),         // #1F242D
-            widget_hover: Color32::from_rgb(42, 49, 61),   // #2A313D
-            widget_pressed: Color32::from_rgb(24, 28, 36), // #181C24
-            tab_active_bg: Color32::from_rgb(31, 36, 45),  // #1F242D
-            tab_active_fg: Color32::from_rgb(245, 166, 35),// #F5A623 warm amber
+            canvas_bg: Color32::from_rgb(13, 15, 18),       // #0D0F12
+            dot_grid: Color32::from_rgb(38, 45, 56),        // subtle 24px dot-grid
+            surface: Color32::from_rgb(22, 25, 30),         // #16191E
+            surface_alt: Color32::from_rgb(33, 39, 49),     // #212731
+            well: Color32::from_rgb(16, 18, 22),            // #101216
+            widget: Color32::from_rgb(34, 40, 50),          // #222832
+            widget_hover: Color32::from_rgb(48, 56, 70),    // #303846
+            widget_pressed: Color32::from_rgb(24, 28, 36),  // #181C24
+            tab_active_bg: Color32::from_rgb(36, 42, 54),   // #242A36
+            tab_active_fg: Color32::from_rgb(255, 184, 56), // #FFB838 bright warm amber
             tab_inactive_bg: Color32::from_rgb(20, 23, 28),
-            border: Color32::from_rgb(42, 47, 58),         // #2A2F3A
-            accent: Color32::from_rgb(245, 166, 35),       // #F5A623
-            text: Color32::from_rgb(230, 234, 240),
-            text_muted: Color32::from_rgb(139, 149, 165),
-            status_green: Color32::from_rgb(34, 197, 94),  // #22C55E
-            status_red: Color32::from_rgb(239, 68, 68),    // #EF4444
-            status_amber: Color32::from_rgb(234, 179, 8),  // #EAB308
-            status_sky: Color32::from_rgb(56, 189, 248),   // #38BDF8
-            section_bg: Color32::from_rgb(28, 32, 40),
-            hover_row: Color32::from_rgb(36, 44, 58),
+            border: Color32::from_rgb(62, 72, 88),          // #3E4858 crisp structural border
+            accent: Color32::from_rgb(255, 184, 56),        // #FFB838
+            text: Color32::from_rgb(242, 245, 250),         // #F2F5FA high-contrast primary text
+            text_muted: Color32::from_rgb(174, 185, 202),   // #AEB9CA >= 8:1 on well/surface
+            status_green: Color32::from_rgb(74, 222, 128),  // #4ADE80
+            status_red: Color32::from_rgb(248, 113, 113),   // #F87171
+            status_amber: Color32::from_rgb(251, 191, 36),  // #FBBF24
+            status_sky: Color32::from_rgb(96, 196, 255),    // #60C4FF
+            section_bg: Color32::from_rgb(30, 35, 44),
+            hover_row: Color32::from_rgb(42, 50, 66),
         },
         ThemeMode::RetroBeos => ThemePalette {
             is_dark: false,
@@ -117,17 +230,21 @@ pub fn palette() -> ThemePalette {
             tab_active_fg: Color32::BLACK,
             tab_inactive_bg: BEOS_TAB_INACTIVE,
             border: BEOS_BORDER_BLACK,
-            accent: BEOS_TAB_YELLOW,
+            accent: Color32::from_rgb(24, 78, 138),         // deep BeOS blue for readable text on light bg
             text: Color32::BLACK,
-            text_muted: Color32::from_rgb(75, 80, 88),
+            text_muted: Color32::from_rgb(70, 76, 84),
             status_green: BEOS_STATUS_GREEN,
             status_red: BEOS_STATUS_RED,
-            status_amber: Color32::from_rgb(184, 134, 11),
+            status_amber: Color32::from_rgb(156, 102, 0),
             status_sky: BEOS_DESKTOP_BLUE,
-            section_bg: Color32::from_rgb(212, 216, 222),
+            section_bg: Color32::from_rgb(206, 212, 220),
             hover_row: Color32::from_rgb(207, 224, 245),
         },
     }
+}
+
+pub fn palette() -> ThemePalette {
+    user_settings().palette
 }
 
 pub fn text_color() -> Color32 {
@@ -143,9 +260,53 @@ pub fn card_fill() -> Color32 {
 }
 
 pub fn apply_theme(ctx: &egui::Context, mode: ThemeMode) {
-    ACTIVE_THEME.store(mode as u8, Ordering::Relaxed);
-    let p = palette();
+    let mut s = user_settings();
+    s.theme_mode = mode;
+    s.palette = preset_palette(mode);
+    apply_user_settings(ctx, s, false);
+}
+
+pub fn apply_user_settings(ctx: &egui::Context, mut settings: UserSettings, reload_fonts: bool) {
+    settings.ui_scale = settings.ui_scale.clamp(0.85, 1.40);
+    settings.base_font_size = settings.base_font_size.clamp(10.0, 18.0);
+    settings.terminal_font_size = settings.terminal_font_size.clamp(10.0, 22.0);
+    ACTIVE_THEME.store(settings.theme_mode as u8, Ordering::Relaxed);
+    {
+        let mut guard = settings_lock()
+            .write()
+            .unwrap_or_else(|e| e.into_inner());
+        *guard = settings;
+    }
+
+    if reload_fonts {
+        configure_fonts_for_preset(ctx, settings.font_preset);
+    }
+    ctx.set_zoom_factor(settings.ui_scale);
+
+    let p = settings.palette;
+    let base = settings.base_font_size;
     ctx.all_styles_mut(|style| {
+        style.text_styles.insert(
+            TextStyle::Small,
+            FontId::new((base - 2.0).max(9.0), FontFamily::Proportional),
+        );
+        style.text_styles.insert(
+            TextStyle::Body,
+            FontId::new(base, FontFamily::Proportional),
+        );
+        style.text_styles.insert(
+            TextStyle::Button,
+            FontId::new(base, FontFamily::Proportional),
+        );
+        style.text_styles.insert(
+            TextStyle::Heading,
+            FontId::new(base + 4.0, FontFamily::Proportional),
+        );
+        style.text_styles.insert(
+            TextStyle::Monospace,
+            FontId::new((base - 0.5).max(9.5), FontFamily::Monospace),
+        );
+
         style.visuals = if p.is_dark {
             egui::Visuals::dark()
         } else {
@@ -163,8 +324,23 @@ pub fn apply_theme(ctx: &egui::Context, mode: ThemeMode) {
         style.visuals.window_fill = p.surface;
         style.visuals.extreme_bg_color = p.well;
         style.visuals.override_text_color = Some(p.text);
+        style.visuals.widgets.noninteractive.bg_fill = p.surface;
+        style.visuals.widgets.noninteractive.bg_stroke = Stroke::new(1.0, p.border);
+        style.visuals.widgets.noninteractive.fg_stroke = Stroke::new(1.0, p.text);
+        style.visuals.widgets.inactive.bg_fill = p.widget;
+        style.visuals.widgets.inactive.weak_bg_fill = p.widget;
+        style.visuals.widgets.inactive.bg_stroke = Stroke::new(1.0, p.border);
+        style.visuals.widgets.inactive.fg_stroke = Stroke::new(1.0, p.text);
+        style.visuals.widgets.hovered.bg_fill = p.widget_hover;
+        style.visuals.widgets.hovered.weak_bg_fill = p.widget_hover;
+        style.visuals.widgets.hovered.bg_stroke = Stroke::new(1.0, p.accent);
+        style.visuals.widgets.hovered.fg_stroke = Stroke::new(1.0, p.text);
+        style.visuals.widgets.active.bg_fill = p.widget_pressed;
+        style.visuals.widgets.active.weak_bg_fill = p.widget_pressed;
+        style.visuals.widgets.active.bg_stroke = Stroke::new(1.0, p.accent);
+        style.visuals.widgets.active.fg_stroke = Stroke::new(1.0, p.text);
         style.visuals.selection.bg_fill = if p.is_dark {
-            Color32::from_rgba_unmultiplied(245, 166, 35, 55)
+            Color32::from_rgba_unmultiplied(p.accent.r(), p.accent.g(), p.accent.b(), 65)
         } else {
             BEOS_TAB_YELLOW
         };

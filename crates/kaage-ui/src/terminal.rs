@@ -31,6 +31,8 @@ impl TerminalPane {
     }
 
     pub fn ui(&mut self, ui: &mut egui::Ui, send_msg: &mut dyn FnMut(ClientMsg)) {
+        let term_font_size = crate::theme::terminal_font_size();
+        self.cell_size = Vec2::new((term_font_size * 0.60).max(6.0), (term_font_size * 1.22).max(12.0));
         let avail = ui.available_size();
         let new_cols = ((avail.x / self.cell_size.x).floor() as u16).max(20);
         let new_rows = ((avail.y / self.cell_size.y).floor() as u16).max(5);
@@ -140,7 +142,7 @@ impl TerminalPane {
         let painter = ui.painter_at(rect);
         painter.rect_filled(rect, CornerRadius::ZERO, default_bg);
 
-        let font = FontId::monospace(14.0);
+        let font = FontId::monospace(term_font_size);
         let screen = self.parser.screen();
         let (rows, cols) = screen.size();
 

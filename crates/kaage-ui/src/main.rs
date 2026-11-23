@@ -6,6 +6,7 @@ mod help;
 mod inspectors;
 mod palette;
 mod panels;
+mod settings;
 mod terminal;
 mod theme;
 mod tracker;
@@ -24,10 +25,11 @@ use kaage_proto::{
     SystemdUnitInfo, SystemdUnitStatus, UnitAction, VitalsTick,
 };
 use palette::{CommandPalette, PaletteAction};
+use settings::SettingsWindow;
 use terminal::TerminalPane;
 use theme::{
-    TOPBAR_HEIGHT, ThemeMode, apply_theme, current_theme_mode, draw_beos_bevel, draw_dot_grid,
-    palette as active_palette,
+    TOPBAR_HEIGHT, ThemeMode, apply_theme, configure_fonts, current_theme_mode, draw_beos_bevel,
+    draw_dot_grid, palette as active_palette,
 };
 use tracker::{BeTrackerSidebar, TrackerAction};
 use vitals::VitalsWindow;
@@ -84,6 +86,7 @@ fn load_wallpaper_texture(ctx: &egui::Context) -> Option<egui::TextureHandle> {
 
 impl KaageApp {
     fn new(cc: &eframe::CreationContext<'_>, ws_url: &str) -> Self {
+        configure_fonts(&cc.egui_ctx);
         let theme_mode = ThemeMode::ObsidianAmber;
         apply_theme(&cc.egui_ctx, theme_mode);
         let wallpaper = load_wallpaper_texture(&cc.egui_ctx);
@@ -386,6 +389,21 @@ impl KaageApp {
         );
     }
 
+    fn open_settings(&mut self) {
+        if self
+            .wm
+            .focus_matching_tab(|k| matches!(k, PaneKind::Settings(_)))
+        {
+            return;
+        }
+        self.wm.open_window(
+            "kaage-settings".into(),
+            PaneKind::Settings(SettingsWindow::new()),
+            self.stage_origin(28.0, 24.0),
+            Vec2::new(760.0, 520.0),
+        );
+    }
+
     fn toggle_theme(&mut self, ctx: &egui::Context) {
         self.theme_mode = current_theme_mode().toggle();
         apply_theme(ctx, self.theme_mode);
@@ -643,6 +661,7 @@ impl eframe::App for KaageApp {
                     TrackerAction::OpenTailscale => self.open_tailscale(),
                     TrackerAction::OpenFileTracker => self.open_file_tracker(),
                     TrackerAction::OpenHelp => self.open_help(),
+                    TrackerAction::OpenSettings => self.open_settings(),
                     TrackerAction::OpenJournal { user } => {
                         let (title, cmd) = if user {
                             (
@@ -724,6 +743,7 @@ impl eframe::App for KaageApp {
                 DeskbarAction::OpenHttpPorts => self.open_http_ports(),
                 DeskbarAction::OpenTailscale => self.open_tailscale(),
                 DeskbarAction::OpenHelp => self.open_help(),
+                DeskbarAction::OpenSettings => self.open_settings(),
             }
         }
 
@@ -744,6 +764,7 @@ impl eframe::App for KaageApp {
                 PaletteAction::OpenTailscale => self.open_tailscale(),
                 PaletteAction::OpenContainers => self.open_containers_window(),
                 PaletteAction::OpenHelp => self.open_help(),
+                PaletteAction::OpenSettings => self.open_settings(),
                 PaletteAction::NewTerminal => {
                     self.spawn_terminal_window("Terminal — shell".into(), None);
                 }

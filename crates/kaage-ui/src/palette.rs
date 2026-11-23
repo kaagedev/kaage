@@ -14,6 +14,7 @@ pub enum PaletteAction {
     OpenTailscale,
     OpenContainers,
     OpenHelp,
+    OpenSettings,
     NewTerminal,
     ToggleTheme,
     ToggleWallpaper,
@@ -294,6 +295,12 @@ fn build_items(
             category: "HELP",
             shortcut: "?".into(),
             action: PaletteAction::OpenHelp,
+        },
+        PaletteItem {
+            label: "Open kaage-settings (Typography, Font Size & Color Editor)".into(),
+            category: "CFG",
+            shortcut: "⚙".into(),
+            action: PaletteAction::OpenSettings,
         },
         PaletteItem {
             label: "Workspace 1: Ops".into(),

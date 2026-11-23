@@ -1,5 +1,5 @@
-use crate::theme::{BEOS_STATUS_GREEN, BEOS_STATUS_RED, BEOS_TAB_YELLOW, be_button};
-use egui::{Color32, RichText, ScrollArea, Ui};
+use crate::theme::{be_button, palette};
+use egui::{RichText, ScrollArea, Ui};
 use kaage_proto::{
     ClientMsg, DirListing, FileEntry, FileKind, FileOp, PreviewContent, WorkspaceDef, WorkspaceItem,
 };
@@ -412,11 +412,12 @@ impl TrackerWindow {
                         .strong()
                         .color(crate::theme::text_color()),
                 );
+                let pal = palette();
                 for item in &self.shelf {
                     ui.label(
                         RichText::new(&item.name)
-                            .background_color(BEOS_TAB_YELLOW)
-                            .color(crate::theme::text_color()),
+                            .background_color(pal.tab_active_bg)
+                            .color(pal.tab_active_fg),
                     );
                 }
                 if be_button(ui, "Move Here").clicked() {
@@ -514,10 +515,11 @@ fn render_folder_pane(
             } else {
                 format!("git:{}", git.branch)
             };
+            let pal = palette();
             ui.label(
                 RichText::new(label)
-                    .background_color(BEOS_TAB_YELLOW)
-                    .color(crate::theme::text_color()),
+                    .background_color(pal.tab_active_bg)
+                    .color(pal.tab_active_fg),
             );
         }
     });
@@ -588,7 +590,7 @@ fn render_folder_pane(
             total_gb
         ))
         .small()
-        .color(Color32::from_rgb(60, 60, 60)),
+        .color(palette().text_muted),
     );
 
     spawn_req
@@ -618,10 +620,11 @@ fn render_entry_row(
             _ => "[FILE]",
         };
 
+        let pal = palette();
         let name_color = if entry.symlink_broken {
-            BEOS_STATUS_RED
+            pal.status_red
         } else {
-            crate::theme::text_color()
+            pal.text
         };
 
         let display_name = if let Some(ref target) = entry.symlink_target {
@@ -655,7 +658,7 @@ fn render_entry_row(
 
         if let Some(unit) = &entry.held_by_unit
             && ui
-                .small_button(RichText::new(format!("● {unit}")).color(BEOS_STATUS_GREEN))
+                .small_button(RichText::new(format!("● {unit}")).color(pal.status_green))
                 .clicked()
         {
             spawn_req = Some(TrackerSpawnRequest::OpenUnitLogs { unit: unit.clone() });
@@ -669,13 +672,13 @@ fn render_entry_row(
                 RichText::new(format!("{:04o}", entry.mode & 0o7777))
                     .monospace()
                     .small()
-                    .color(Color32::from_rgb(100, 100, 100)),
+                    .color(pal.text_muted),
             );
             if entry.kind != FileKind::Directory {
                 ui.label(
                     RichText::new(format_bytes(entry.size))
                         .small()
-                        .color(Color32::from_rgb(75, 75, 75)),
+                        .color(pal.text_muted),
                 );
             }
         });

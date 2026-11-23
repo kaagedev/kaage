@@ -7,6 +7,7 @@ use crate::inspectors::{
 use crate::panels::{
     render_ai_jobs, render_http_ports, render_system_monitor, render_tailscale_panel,
 };
+use crate::settings::SettingsWindow;
 use crate::terminal::TerminalPane;
 use crate::theme::{TOPBAR_HEIGHT, draw_beos_bevel, palette};
 use crate::vitals::{VitalsSpawnRequest, VitalsWindow};
@@ -36,6 +37,7 @@ pub enum PaneKind {
     FileTracker(Box<TrackerWindow>),
     Vitals(Box<VitalsWindow>),
     Help(HelpWindow),
+    Settings(SettingsWindow),
 }
 
 pub struct BeTab {
@@ -664,6 +666,9 @@ impl BeWindowManager {
                                 }
                                 PaneKind::Help(help) => {
                                     help.ui(&mut child_ui);
+                                }
+                                PaneKind::Settings(settings) => {
+                                    settings.ui(&mut child_ui);
                                 }
                             }
                         }

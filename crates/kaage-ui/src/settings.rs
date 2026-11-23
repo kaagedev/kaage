@@ -1,0 +1,386 @@
+use crate::theme::{
+    FontPreset, ThemeMode, ThemePalette, apply_user_settings, be_button, be_toggle_button, palette,
+    preset_palette, user_settings,
+};
+use egui::{Color32, CornerRadius, RichText, ScrollArea, Stroke, Ui};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SettingsTab {
+    #[default]
+    Typography,
+    ColorTheme,
+}
+
+pub struct SettingsWindow {
+    pub tab: SettingsTab,
+}
+
+impl SettingsWindow {
+    pub fn new() -> Self {
+        Self {
+            tab: SettingsTab::Typography,
+        }
+    }
+
+    pub fn ui(&mut self, ui: &mut Ui) {
+        let p = palette();
+
+        ui.horizontal_wrapped(|ui| {
+            ui.label(
+                RichText::new("kaage-settings")
+                    .strong()
+                    .size(13.0)
+                    .color(p.accent),
+            );
+            ui.separator();
+            if be_toggle_button(
+                ui,
+                "Typography & Sizing",
+                self.tab == SettingsTab::Typography,
+            )
+            .clicked()
+            {
+                self.tab = SettingsTab::Typography;
+            }
+            if be_toggle_button(
+                ui,
+                "Color Theme Editor",
+                self.tab == SettingsTab::ColorTheme,
+            )
+            .clicked()
+            {
+                self.tab = SettingsTab::ColorTheme;
+            }
+        });
+        ui.separator();
+
+        ScrollArea::vertical()
+            .id_salt("kaage_settings_scroll")
+            .show(ui, |ui| match self.tab {
+                SettingsTab::Typography => render_typography_tab(ui),
+                SettingsTab::ColorTheme => render_color_theme_tab(ui),
+            });
+    }
+}
+
+fn render_typography_tab(ui: &mut Ui) {
+    let ctx = ui.ctx().clone();
+    let mut s = user_settings();
+    let mut changed = false;
+    let mut reload_fonts = false;
+    let p = s.palette;
+
+    section_title(ui, "FONT FAMILY");
+    ui.label(
+        RichText::new(
+            "IBM Plex Sans is used for application UI typography and IBM Plex Mono for terminals, code, and tabular metrics.",
+        )
+        .size(11.5)
+        .color(p.text_muted),
+    );
+    ui.add_space(4.0);
+    ui.horizontal_wrapped(|ui| {
+        for preset in [
+            FontPreset::IbmPlex,
+            FontPreset::IbmPlexMonoAll,
+            FontPreset::EguiDefault,
+        ] {
+            if be_toggle_button(ui, preset.label(), s.font_preset == preset).clicked() {
+                s.font_preset = preset;
+                changed = true;
+                reload_fonts = true;
+            }
+        }
+    });
+
+    ui.add_space(10.0);
+    section_title(ui, "FONT SIZE & INTERFACE SCALE");
+    egui::Frame::NONE
+        .fill(p.well)
+        .stroke(Stroke::new(1.0, p.border))
+        .inner_margin(8.0)
+        .show(ui, |ui| {
+            ui.set_min_width(ui.available_width());
+
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("UI Font Size (pt):").color(p.text));
+                if ui
+                    .add(egui::Slider::new(&mut s.base_font_size, 10.0..=18.0).step_by(0.5))
+                    .changed()
+                {
+                    changed = true;
+                }
+                if be_button(ui, "11").clicked() {
+                    s.base_font_size = 11.0;
+                    changed = true;
+                }
+                if be_button(ui, "13").clicked() {
+                    s.base_font_size = 13.0;
+                    changed = true;
+                }
+                if be_button(ui, "15").clicked() {
+                    s.base_font_size = 15.0;
+                    changed = true;
+                }
+            });
+
+            ui.add_space(4.0);
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("Terminal Font Size (pt):").color(p.text));
+                if ui
+                    .add(egui::Slider::new(&mut s.terminal_font_size, 10.0..=22.0).step_by(0.5))
+                    .changed()
+                {
+                    changed = true;
+                }
+                if be_button(ui, "12").clicked() {
+                    s.terminal_font_size = 12.0;
+                    changed = true;
+                }
+                if be_button(ui, "14").clicked() {
+                    s.terminal_font_size = 14.0;
+                    changed = true;
+                }
+                if be_button(ui, "16").clicked() {
+                    s.terminal_font_size = 16.0;
+                    changed = true;
+                }
+            });
+
+            ui.add_space(4.0);
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("Global UI Zoom:").color(p.text));
+                if ui
+                    .add(
+                        egui::Slider::new(&mut s.ui_scale, 0.85..=1.40)
+                            .step_by(0.05)
+                            .custom_formatter(|v, _| format!("{:.0}%", v * 100.0)),
+                    )
+                    .changed()
+                {
+                    changed = true;
+                }
+                if be_button(ui, "100%").clicked() {
+                    s.ui_scale = 1.0;
+                    changed = true;
+                }
+            });
+        });
+
+    ui.add_space(10.0);
+    section_title(ui, "LIVE TYPOGRAPHY PREVIEW");
+    egui::Frame::NONE
+        .fill(p.well)
+        .stroke(Stroke::new(1.0, p.border))
+        .inner_margin(8.0)
+        .show(ui, |ui| {
+            ui.set_min_width(ui.available_width());
+            ui.label(
+                RichText::new("Application Heading — IBM Plex Sans")
+                    .strong()
+                    .size(s.base_font_size + 3.0)
+                    .color(p.accent),
+            );
+            ui.label(
+                RichText::new(
+                    "Operational cockpit telemetry, service inspectors, and file previews use clean proportional sans-serif typography.",
+                )
+                .size(s.base_font_size)
+                .color(p.text),
+            );
+            ui.add_space(4.0);
+            egui::Frame::NONE
+                .fill(p.surface)
+                .stroke(Stroke::new(1.0, p.border))
+                .corner_radius(CornerRadius::ZERO)
+                .inner_margin(6.0)
+                .show(ui, |ui| {
+                    ui.set_min_width(ui.available_width());
+                    ui.label(
+                        RichText::new(
+                            "$ systemctl --user status kaaged.service\n● kaaged.service - Kaage Mission-Control Daemon (active: running, PID 4821)",
+                        )
+                        .monospace()
+                        .size(s.terminal_font_size)
+                        .color(p.status_green),
+                    );
+                });
+        });
+
+    if changed {
+        apply_user_settings(&ctx, s, reload_fonts);
+    }
+}
+
+fn render_color_theme_tab(ui: &mut Ui) {
+    let ctx = ui.ctx().clone();
+    let mut s = user_settings();
+    let mut changed = false;
+
+    section_title(ui, "THEME PRESETS");
+    ui.horizontal_wrapped(|ui| {
+        if be_button(ui, "Obsidian & Amber").clicked() {
+            s.theme_mode = ThemeMode::ObsidianAmber;
+            s.palette = preset_palette(ThemeMode::ObsidianAmber);
+            changed = true;
+        }
+        if be_button(ui, "Midnight Slate").clicked() {
+            s.theme_mode = ThemeMode::ObsidianAmber;
+            s.palette = midnight_slate_palette();
+            changed = true;
+        }
+        if be_button(ui, "Gruvbox Dark").clicked() {
+            s.theme_mode = ThemeMode::ObsidianAmber;
+            s.palette = gruvbox_dark_palette();
+            changed = true;
+        }
+        if be_button(ui, "Retro BeOS (Light)").clicked() {
+            s.theme_mode = ThemeMode::RetroBeos;
+            s.palette = preset_palette(ThemeMode::RetroBeos);
+            changed = true;
+        }
+        if be_button(ui, "Reset Current").clicked() {
+            s.palette = preset_palette(s.theme_mode);
+            changed = true;
+        }
+    });
+
+    ui.add_space(8.0);
+    section_title(ui, "LIVE COLOR THEME EDITOR");
+    let pal_preview = s.palette;
+    egui::Frame::NONE
+        .fill(pal_preview.well)
+        .stroke(Stroke::new(1.0, pal_preview.border))
+        .inner_margin(8.0)
+        .show(ui, |ui| {
+            ui.set_min_width(ui.available_width());
+            ui.columns(2, |cols| {
+                cols[0].label(
+                    RichText::new("SURFACES & CHROME")
+                        .monospace()
+                        .strong()
+                        .size(10.0)
+                        .color(pal_preview.accent),
+                );
+                changed |= color_row(&mut cols[0], "Canvas BG", &mut s.palette.canvas_bg);
+                changed |= color_row(&mut cols[0], "Panel Surface", &mut s.palette.surface);
+                changed |= color_row(&mut cols[0], "Alt Surface", &mut s.palette.surface_alt);
+                changed |= color_row(&mut cols[0], "Recessed Well", &mut s.palette.well);
+                changed |= color_row(&mut cols[0], "Widget Face", &mut s.palette.widget);
+                changed |= color_row(&mut cols[0], "Widget Hover", &mut s.palette.widget_hover);
+                changed |= color_row(&mut cols[0], "Structural Border", &mut s.palette.border);
+                changed |= color_row(&mut cols[0], "Section Header", &mut s.palette.section_bg);
+                changed |= color_row(&mut cols[0], "Row Hover", &mut s.palette.hover_row);
+
+                cols[1].label(
+                    RichText::new("ACCENTS, TABS & TEXT")
+                        .monospace()
+                        .strong()
+                        .size(10.0)
+                        .color(pal_preview.accent),
+                );
+                changed |= color_row(&mut cols[1], "Primary Text", &mut s.palette.text);
+                changed |= color_row(&mut cols[1], "Muted Text", &mut s.palette.text_muted);
+                changed |= color_row(&mut cols[1], "Accent", &mut s.palette.accent);
+                changed |= color_row(&mut cols[1], "Active Tab BG", &mut s.palette.tab_active_bg);
+                changed |= color_row(&mut cols[1], "Active Tab Text", &mut s.palette.tab_active_fg);
+                changed |= color_row(&mut cols[1], "Status Green", &mut s.palette.status_green);
+                changed |= color_row(&mut cols[1], "Status Red", &mut s.palette.status_red);
+                changed |= color_row(&mut cols[1], "Status Amber", &mut s.palette.status_amber);
+                changed |= color_row(&mut cols[1], "Status Sky", &mut s.palette.status_sky);
+            });
+        });
+
+    ui.add_space(8.0);
+    section_title(ui, "CONTRAST CHECK PREVIEW");
+    egui::Frame::NONE
+        .fill(s.palette.surface)
+        .stroke(Stroke::new(1.0, s.palette.border))
+        .inner_margin(8.0)
+        .show(ui, |ui| {
+            ui.set_min_width(ui.available_width());
+            ui.horizontal_wrapped(|ui| {
+                ui.label(RichText::new("Primary Text").strong().color(s.palette.text));
+                ui.label(RichText::new("Muted Label").color(s.palette.text_muted));
+                ui.label(RichText::new("Accent Highlight").strong().color(s.palette.accent));
+                ui.label(RichText::new("● active").monospace().color(s.palette.status_green));
+                ui.label(RichText::new("● failed").monospace().color(s.palette.status_red));
+                ui.label(RichText::new("● tailnet").monospace().color(s.palette.status_sky));
+            });
+        });
+
+    if changed {
+        apply_user_settings(&ctx, s, false);
+    }
+}
+
+fn color_row(ui: &mut Ui, label: &str, color: &mut Color32) -> bool {
+    let p = palette();
+    let mut changed = false;
+    ui.horizontal(|ui| {
+        if ui.color_edit_button_srgba(color).changed() {
+            changed = true;
+        }
+        ui.label(RichText::new(label).size(11.5).color(p.text));
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            ui.label(
+                RichText::new(format!("#{:02X}{:02X}{:02X}", color.r(), color.g(), color.b()))
+                    .monospace()
+                    .size(10.0)
+                    .color(p.text_muted),
+            );
+        });
+    });
+    changed
+}
+
+fn section_title(ui: &mut Ui, title: &str) {
+    let p = palette();
+    ui.label(
+        RichText::new(title)
+            .monospace()
+            .strong()
+            .size(11.0)
+            .color(p.accent),
+    );
+    ui.add_space(3.0);
+}
+
+fn midnight_slate_palette() -> ThemePalette {
+    let mut p = preset_palette(ThemeMode::ObsidianAmber);
+    p.canvas_bg = Color32::from_rgb(10, 14, 23);
+    p.surface = Color32::from_rgb(17, 24, 39);
+    p.surface_alt = Color32::from_rgb(26, 36, 56);
+    p.well = Color32::from_rgb(12, 17, 29);
+    p.widget = Color32::from_rgb(28, 39, 60);
+    p.widget_hover = Color32::from_rgb(38, 53, 80);
+    p.tab_active_bg = Color32::from_rgb(24, 42, 68);
+    p.tab_active_fg = Color32::from_rgb(56, 189, 248);
+    p.accent = Color32::from_rgb(56, 189, 248);
+    p.border = Color32::from_rgb(56, 74, 102);
+    p.section_bg = Color32::from_rgb(22, 31, 49);
+    p.hover_row = Color32::from_rgb(33, 46, 72);
+    p
+}
+
+fn gruvbox_dark_palette() -> ThemePalette {
+    let mut p = preset_palette(ThemeMode::ObsidianAmber);
+    p.canvas_bg = Color32::from_rgb(29, 32, 33);
+    p.surface = Color32::from_rgb(40, 40, 40);
+    p.surface_alt = Color32::from_rgb(50, 48, 47);
+    p.well = Color32::from_rgb(29, 32, 33);
+    p.widget = Color32::from_rgb(60, 56, 54);
+    p.widget_hover = Color32::from_rgb(80, 73, 69);
+    p.tab_active_bg = Color32::from_rgb(60, 56, 54);
+    p.tab_active_fg = Color32::from_rgb(250, 189, 47);
+    p.accent = Color32::from_rgb(250, 189, 47);
+    p.border = Color32::from_rgb(102, 92, 84);
+    p.text = Color32::from_rgb(235, 219, 178);
+    p.text_muted = Color32::from_rgb(189, 174, 147);
+    p.status_green = Color32::from_rgb(184, 187, 38);
+    p.status_red = Color32::from_rgb(251, 73, 52);
+    p.status_sky = Color32::from_rgb(131, 165, 152);
+    p.section_bg = Color32::from_rgb(50, 48, 47);
+    p.hover_row = Color32::from_rgb(68, 62, 58);
+    p
+}
