@@ -644,6 +644,29 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
                 let snap = telemetry::collect_dashboard_snapshot().await;
                 let _ = out_tx.send(ServerMsg::Dashboard(snap));
             }
+            ClientMsg::RegisterTailscaleServe {
+                https_port,
+                local_port,
+            } => {
+                let res = telemetry::register_tailscale_serve(https_port, local_port).await;
+                let _ = out_tx.send(ServerMsg::ActionFeedback {
+                    target: format!("tailscale :{https_port}"),
+                    ok: res.is_ok(),
+                    message: res.unwrap_or_else(|e| e),
+                });
+                let snap = telemetry::collect_dashboard_snapshot().await;
+                let _ = out_tx.send(ServerMsg::Dashboard(snap));
+            }
+            ClientMsg::UnregisterTailscaleServe { https_port } => {
+                let res = telemetry::unregister_tailscale_serve(https_port).await;
+                let _ = out_tx.send(ServerMsg::ActionFeedback {
+                    target: format!("tailscale :{https_port}"),
+                    ok: res.is_ok(),
+                    message: res.unwrap_or_else(|e| e),
+                });
+                let snap = telemetry::collect_dashboard_snapshot().await;
+                let _ = out_tx.send(ServerMsg::Dashboard(snap));
+            }
             ClientMsg::GetUnitStatus { unit, scope } => {
                 let normalized = normalize_service_name(&unit);
                 match get_unit_status(&state, &normalized, scope).await {

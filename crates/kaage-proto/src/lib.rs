@@ -147,6 +147,10 @@ pub struct ListeningPortInfo {
 pub struct TailscaleServeEntry {
     pub https_url: String,
     pub target: String,
+    #[serde(default)]
+    pub mount_path: String,
+    #[serde(default)]
+    pub funnel: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -549,6 +553,13 @@ pub enum ClientMsg {
     SignalProcess {
         pid: u32,
         signal: ProcessSignal,
+    },
+    RegisterTailscaleServe {
+        https_port: u16,
+        local_port: u16,
+    },
+    UnregisterTailscaleServe {
+        https_port: u16,
     },
 }
 

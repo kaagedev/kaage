@@ -22,8 +22,8 @@ pub enum DeskbarAction {
         state: StateFilter,
     },
     OpenVitals,
-    OpenHttpPorts,
     OpenTailscale,
+    OpenTailscaleServices,
     OpenHelp,
     OpenSettings,
 }
@@ -484,10 +484,14 @@ impl BeDeskbar {
                         );
                         if ui
                             .interact(r, Id::unique(("topbar_port", port.port)), Sense::click())
-                            .on_hover_text(format!("{} ({})", port.label, port.tailscale_url.as_deref().unwrap_or("")))
+                            .on_hover_text(format!(
+                                "{} ({})\nClick to open Tailscale Services",
+                                port.label,
+                                port.tailscale_url.as_deref().unwrap_or("")
+                            ))
                             .clicked()
                         {
-                            action = Some(DeskbarAction::OpenHttpPorts);
+                            action = Some(DeskbarAction::OpenTailscaleServices);
                         }
                         px = r.max.x + 4.0;
                     }

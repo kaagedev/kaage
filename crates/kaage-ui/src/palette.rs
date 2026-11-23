@@ -12,6 +12,7 @@ pub enum PaletteAction {
     OpenAiJobs,
     OpenHttpPorts,
     OpenTailscale,
+    OpenTailscaleServices,
     OpenContainers,
     OpenHelp,
     OpenSettings,
@@ -277,6 +278,12 @@ fn build_items(
             category: "APP",
             shortcut: "NET".into(),
             action: PaletteAction::OpenHttpPorts,
+        },
+        PaletteItem {
+            label: "Open Tailscale Services (Exposed Node Endpoints)".into(),
+            category: "NET",
+            shortcut: "SVC".into(),
+            action: PaletteAction::OpenTailscaleServices,
         },
         PaletteItem {
             label: "Open Tailscale Mesh & Serve".into(),

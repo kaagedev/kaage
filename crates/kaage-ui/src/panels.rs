@@ -551,6 +551,23 @@ pub fn render_http_ports(
                             );
                         }
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if let Some(ref url) = p.tailscale_url {
+                                let https_port = extract_https_port(url);
+                                if be_button(ui, "Unregister").clicked() {
+                                    send_msg(ClientMsg::UnregisterTailscaleServe { https_port });
+                                }
+                            } else if be_button(ui, "Expose TS")
+                                .on_hover_text(format!(
+                                    "Register local :{} on Tailscale HTTPS :{}",
+                                    p.port, p.port
+                                ))
+                                .clicked()
+                            {
+                                send_msg(ClientMsg::RegisterTailscaleServe {
+                                    https_port: p.port,
+                                    local_port: p.port,
+                                });
+                            }
                             ui.label(
                                 RichText::new(&p.bind_addr)
                                     .monospace()
@@ -560,12 +577,22 @@ pub fn render_http_ports(
                         });
                     });
                     if let Some(ref url) = p.tailscale_url {
-                        ui.label(
-                            RichText::new(format!("Tailscale HTTPS: {url}"))
-                                .monospace()
-                                .size(10.5)
-                                .color(pal.status_green),
-                        );
+                        ui.horizontal_wrapped(|ui| {
+                            ui.label(
+                                RichText::new("Tailscale HTTPS:")
+                                    .monospace()
+                                    .size(10.5)
+                                    .color(pal.text_muted),
+                            );
+                            ui.hyperlink_to(
+                                RichText::new(url)
+                                    .monospace()
+                                    .strong()
+                                    .size(10.5)
+                                    .color(pal.status_green),
+                                url,
+                            );
+                        });
                     }
                 });
                 ui.add_space(3.0);
@@ -644,12 +671,23 @@ pub fn render_tailscale_panel(
                     );
                 });
                 if !ts.dns_name.is_empty() {
-                    ui.label(
-                        RichText::new(format!("MagicDNS: {}", ts.dns_name))
-                            .monospace()
-                            .size(11.0)
-                            .color(pal.status_sky),
-                    );
+                    let node_url = format!("https://{}", ts.dns_name);
+                    ui.horizontal_wrapped(|ui| {
+                        ui.label(
+                            RichText::new("MagicDNS:")
+                                .monospace()
+                                .size(11.0)
+                                .color(pal.text_muted),
+                        );
+                        ui.hyperlink_to(
+                            RichText::new(&ts.dns_name)
+                                .monospace()
+                                .strong()
+                                .size(11.0)
+                                .color(pal.status_sky),
+                            &node_url,
+                        );
+                    });
                 }
                 if !ts.tailscale_ips.is_empty() {
                     ui.label(
@@ -680,11 +718,13 @@ pub fn render_tailscale_panel(
                     for s in &ts.serves {
                         ui.horizontal(|ui| {
                             status_led(ui, BEOS_LED_GREEN);
-                            ui.label(
+                            ui.hyperlink_to(
                                 RichText::new(&s.https_url)
                                     .monospace()
+                                    .strong()
                                     .size(11.0)
                                     .color(pal.status_sky),
+                                &s.https_url,
                             );
                             ui.label(RichText::new("→").color(pal.text_muted));
                             ui.label(
@@ -692,6 +732,17 @@ pub fn render_tailscale_panel(
                                     .monospace()
                                     .size(10.5)
                                     .color(pal.text),
+                            );
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    let https_port = extract_https_port(&s.https_url);
+                                    if be_button(ui, "Unregister").clicked() {
+                                        send_msg(ClientMsg::UnregisterTailscaleServe {
+                                            https_port,
+                                        });
+                                    }
+                                },
                             );
                         });
                     }
@@ -722,12 +773,24 @@ pub fn render_tailscale_panel(
                                 Color32::from_rgb(130, 138, 150)
                             };
                             status_led(ui, led);
-                            ui.label(
-                                RichText::new(&peer.hostname)
-                                    .strong()
-                                    .size(11.5)
-                                    .color(pal.text),
-                            );
+                            if !peer.dns_name.is_empty() {
+                                let peer_url = format!("https://{}", peer.dns_name);
+                                ui.hyperlink_to(
+                                    RichText::new(&peer.hostname)
+                                        .strong()
+                                        .size(11.5)
+                                        .color(pal.status_sky),
+                                    &peer_url,
+                                )
+                                .on_hover_text(&peer_url);
+                            } else {
+                                ui.label(
+                                    RichText::new(&peer.hostname)
+                                        .strong()
+                                        .size(11.5)
+                                        .color(pal.text),
+                                );
+                            }
                             ui.label(
                                 RichText::new(format!("[{}]", peer.os))
                                     .monospace()
@@ -762,6 +825,388 @@ pub fn render_tailscale_panel(
                 }
             });
         });
+}
+
+/// Tailscale Services screen: all Tailscale Serve / Funnel services exposed from this node,
+/// enriched with backing process health, clickable HTTPS links, copy buttons, and unexposed local ports.
+pub fn render_tailscale_services(
+    ui: &mut Ui,
+    filter: &mut String,
+    local_port_input: &mut String,
+    https_port_input: &mut String,
+    dashboard: Option<&DashboardSnapshot>,
+    send_msg: &mut dyn FnMut(ClientMsg),
+) {
+    let pal = palette();
+    ui.horizontal(|ui| {
+        ui.label(
+            RichText::new("Tailscale Exposed Services")
+                .strong()
+                .color(pal.text),
+        );
+        ui.separator();
+        ui.label(RichText::new("Filter:").color(pal.text_muted));
+        ui.add(egui::TextEdit::singleline(filter).desired_width(150.0));
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if be_button(ui, "Refresh").clicked() {
+                send_msg(ClientMsg::RefreshDashboard);
+            }
+        });
+    });
+    ui.separator();
+
+    let Some(dash) = dashboard else {
+        ui.label(
+            RichText::new("Querying tailscale serve status...")
+                .italics()
+                .color(pal.text_muted),
+        );
+        return;
+    };
+
+    let ts = &dash.tailscale;
+    if !ts.available {
+        ui.label(
+            RichText::new(format!(
+                "Tailscale unavailable: {}",
+                ts.error.as_deref().unwrap_or("not running")
+            ))
+            .color(pal.status_red),
+        );
+        return;
+    }
+
+    let node_name = if !ts.dns_name.is_empty() {
+        ts.dns_name.as_str()
+    } else {
+        ts.hostname.as_str()
+    };
+
+    let online_count = ts
+        .serves
+        .iter()
+        .filter(|s| {
+            extract_target_port(&s.target)
+                .map(|port| dash.listening_ports.iter().any(|lp| lp.port == port))
+                .unwrap_or(false)
+        })
+        .count();
+
+    ui.horizontal_wrapped(|ui| {
+        ui.label(RichText::new("Node:").size(11.5).color(pal.text_muted));
+        if !ts.dns_name.is_empty() {
+            let node_url = format!("https://{}", ts.dns_name);
+            ui.hyperlink_to(
+                RichText::new(node_name)
+                    .monospace()
+                    .strong()
+                    .size(11.5)
+                    .color(pal.status_sky),
+                &node_url,
+            );
+        } else {
+            ui.label(
+                RichText::new(node_name)
+                    .monospace()
+                    .strong()
+                    .size(11.5)
+                    .color(pal.status_sky),
+            );
+        }
+        ui.label(
+            RichText::new(format!(
+                "• {} exposed • {} backing ports online",
+                ts.serves.len(),
+                online_count
+            ))
+            .size(11.0)
+            .color(pal.text_muted),
+        );
+        if !ts.tailscale_ips.is_empty() {
+            ui.label(
+                RichText::new(format!("• {}", ts.tailscale_ips.join(", ")))
+                    .monospace()
+                    .size(10.5)
+                    .color(pal.text_muted),
+            );
+        }
+    });
+    ui.add_space(4.0);
+
+    // Inline Register Custom Local Service Bar
+    be_card(ui, |ui| {
+        ui.horizontal_wrapped(|ui| {
+            ui.label(
+                RichText::new("Register Local Service:")
+                    .strong()
+                    .size(11.0)
+                    .color(pal.accent),
+            );
+            ui.label(RichText::new("Local port").size(11.0).color(pal.text_muted));
+            ui.add(
+                egui::TextEdit::singleline(local_port_input)
+                    .hint_text("8000")
+                    .desired_width(62.0),
+            );
+            ui.label(RichText::new("→ HTTPS port").size(11.0).color(pal.text_muted));
+            ui.add(
+                egui::TextEdit::singleline(https_port_input)
+                    .hint_text("same")
+                    .desired_width(62.0),
+            );
+            if be_button(ui, "+ Register").clicked()
+                && let Ok(local_port) = local_port_input.trim().parse::<u16>()
+                && local_port > 0
+            {
+                let https_port = https_port_input
+                    .trim()
+                    .parse::<u16>()
+                    .ok()
+                    .filter(|&p| p > 0)
+                    .unwrap_or(local_port);
+                send_msg(ClientMsg::RegisterTailscaleServe {
+                    https_port,
+                    local_port,
+                });
+                local_port_input.clear();
+                https_port_input.clear();
+            }
+        });
+    });
+    ui.add_space(4.0);
+
+    let needle = filter.to_ascii_lowercase();
+    ScrollArea::vertical()
+        .id_salt("tailscale_services_scroll")
+        .show(ui, |ui| {
+            section_banner(ui, &format!("EXPOSED SERVICES ({})", ts.serves.len()));
+
+            if ts.serves.is_empty() {
+                be_card(ui, |ui| {
+                    ui.label(
+                        RichText::new("No Tailscale Serve routes are currently exposed from this node.")
+                            .italics()
+                            .color(pal.text_muted),
+                    );
+                    ui.label(
+                        RichText::new("Expose a local service with: tailscale serve --bg --https=<port> http://127.0.0.1:<port>")
+                            .monospace()
+                            .size(10.5)
+                            .color(pal.accent),
+                    );
+                });
+            } else {
+                let mut shown = 0usize;
+                for serve in &ts.serves {
+                    let target_port = extract_target_port(&serve.target);
+                    let backing = target_port.and_then(|port| {
+                        dash.listening_ports.iter().find(|lp| lp.port == port)
+                    });
+                    let friendly = backing
+                        .map(|lp| lp.label.as_str())
+                        .unwrap_or("Exposed Service");
+                    let proc_str = backing
+                        .filter(|lp| !lp.process.is_empty())
+                        .map(|lp| match lp.pid {
+                            Some(pid) => format!("{} (pid {pid})", lp.process),
+                            None => lp.process.clone(),
+                        })
+                        .unwrap_or_default();
+
+                    if !needle.is_empty()
+                        && !serve.https_url.to_ascii_lowercase().contains(&needle)
+                        && !serve.target.to_ascii_lowercase().contains(&needle)
+                        && !friendly.to_ascii_lowercase().contains(&needle)
+                        && !proc_str.to_ascii_lowercase().contains(&needle)
+                    {
+                        continue;
+                    }
+                    shown += 1;
+
+                    let is_up = backing.is_some();
+                    be_card(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            status_led(ui, if is_up { BEOS_LED_GREEN } else { BEOS_LED_RED });
+                            ui.label(RichText::new(friendly).strong().color(pal.text));
+
+                            let (scope_label, scope_col) = if serve.funnel {
+                                ("[FUNNEL · PUBLIC]", pal.status_amber)
+                            } else {
+                                ("[TAILNET ONLY]", pal.status_sky)
+                            };
+                            ui.label(
+                                RichText::new(scope_label)
+                                    .monospace()
+                                    .size(10.0)
+                                    .color(scope_col),
+                            );
+
+                            ui.label(
+                                RichText::new(if is_up { "ONLINE" } else { "TARGET DOWN" })
+                                    .monospace()
+                                    .size(10.0)
+                                    .color(if is_up {
+                                        pal.status_green
+                                    } else {
+                                        pal.status_red
+                                    }),
+                            );
+
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    let https_port = extract_https_port(&serve.https_url);
+                                    if be_button(ui, "Unregister")
+                                        .on_hover_text(format!(
+                                            "tailscale serve --https={https_port} off"
+                                        ))
+                                        .clicked()
+                                    {
+                                        send_msg(ClientMsg::UnregisterTailscaleServe {
+                                            https_port,
+                                        });
+                                    }
+                                    if be_button(ui, "Open ↗").clicked() {
+                                        ui.ctx()
+                                            .open_url(egui::OpenUrl::new_tab(&serve.https_url));
+                                    }
+                                    if be_button(ui, "Copy").clicked() {
+                                        ui.ctx().copy_text(serve.https_url.clone());
+                                    }
+                                },
+                            );
+                        });
+
+                        ui.horizontal_wrapped(|ui| {
+                            ui.hyperlink_to(
+                                RichText::new(&serve.https_url)
+                                    .monospace()
+                                    .strong()
+                                    .size(11.5)
+                                    .color(pal.accent),
+                                &serve.https_url,
+                            );
+                            let mount = if serve.mount_path.is_empty() {
+                                "/"
+                            } else {
+                                serve.mount_path.as_str()
+                            };
+                            ui.label(
+                                RichText::new(format!(" {mount} → {}", serve.target))
+                                    .monospace()
+                                    .size(11.0)
+                                    .color(pal.text_muted),
+                            );
+                        });
+
+                        if !proc_str.is_empty() {
+                            ui.label(
+                                RichText::new(format!("Backing process: {proc_str}"))
+                                    .monospace()
+                                    .size(10.0)
+                                    .color(pal.text_muted),
+                            );
+                        }
+                    });
+                    ui.add_space(4.0);
+                }
+
+                if shown == 0 {
+                    ui.label(
+                        RichText::new("No exposed Tailscale services match the current filter.")
+                            .italics()
+                            .color(pal.text_muted),
+                    );
+                }
+            }
+
+            // Unexposed local ports that could be exposed with `tailscale serve`
+            let unexposed: Vec<_> = dash
+                .listening_ports
+                .iter()
+                .filter(|lp| lp.tailscale_url.is_none())
+                .filter(|lp| {
+                    needle.is_empty()
+                        || lp.port.to_string().contains(&needle)
+                        || lp.label.to_ascii_lowercase().contains(&needle)
+                        || lp.process.to_ascii_lowercase().contains(&needle)
+                })
+                .collect();
+
+            if !unexposed.is_empty() {
+                ui.add_space(8.0);
+                section_banner(
+                    ui,
+                    &format!("LOCAL PORTS NOT EXPOSED VIA TAILSCALE ({})", unexposed.len()),
+                );
+                be_card(ui, |ui| {
+                    for lp in unexposed {
+                        let cmd = format!(
+                            "tailscale serve --bg --https={} http://127.0.0.1:{}",
+                            lp.port, lp.port
+                        );
+                        ui.horizontal(|ui| {
+                            status_led(ui, BEOS_LED_GOLD);
+                            ui.label(
+                                RichText::new(format!(":{}", lp.port))
+                                    .monospace()
+                                    .strong()
+                                    .color(pal.status_sky),
+                            );
+                            ui.label(RichText::new(&lp.label).color(pal.text));
+                            if !lp.process.is_empty() {
+                                ui.label(
+                                    RichText::new(format!("({})", lp.process))
+                                        .monospace()
+                                        .size(10.0)
+                                        .color(pal.text_muted),
+                                );
+                            }
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    if be_button(ui, "+ Register")
+                                        .on_hover_text(&cmd)
+                                        .clicked()
+                                    {
+                                        send_msg(ClientMsg::RegisterTailscaleServe {
+                                            https_port: lp.port,
+                                            local_port: lp.port,
+                                        });
+                                    }
+                                    if be_button(ui, "Copy cmd")
+                                        .on_hover_text(&cmd)
+                                        .clicked()
+                                    {
+                                        ui.ctx().copy_text(cmd.clone());
+                                    }
+                                },
+                            );
+                        });
+                    }
+                });
+            }
+        });
+}
+
+fn extract_target_port(target: &str) -> Option<u16> {
+    target
+        .rsplit(':')
+        .next()
+        .and_then(|s| s.split('/').next())
+        .and_then(|s| s.parse::<u16>().ok())
+}
+
+fn extract_https_port(https_url: &str) -> u16 {
+    let without_scheme = https_url
+        .strip_prefix("https://")
+        .or_else(|| https_url.strip_prefix("http://"))
+        .unwrap_or(https_url);
+    let authority = without_scheme.split('/').next().unwrap_or(without_scheme);
+    authority
+        .rsplit_once(':')
+        .and_then(|(_, port_str)| port_str.parse::<u16>().ok())
+        .unwrap_or(443)
 }
 
 fn section_banner(ui: &mut Ui, title: &str) {

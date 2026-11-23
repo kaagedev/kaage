@@ -6,6 +6,7 @@ use crate::inspectors::{
 };
 use crate::panels::{
     render_ai_jobs, render_http_ports, render_system_monitor, render_tailscale_panel,
+    render_tailscale_services,
 };
 use crate::settings::SettingsWindow;
 use crate::terminal::TerminalPane;
@@ -34,6 +35,11 @@ pub enum PaneKind {
         filter: String,
     },
     TailscalePanel,
+    TailscaleServices {
+        filter: String,
+        local_port_input: String,
+        https_port_input: String,
+    },
     FileTracker(Box<TrackerWindow>),
     Vitals(Box<VitalsWindow>),
     Help(HelpWindow),
@@ -606,6 +612,20 @@ impl BeWindowManager {
                                 }
                                 PaneKind::TailscalePanel => {
                                     render_tailscale_panel(&mut child_ui, dashboard, send_msg);
+                                }
+                                PaneKind::TailscaleServices {
+                                    filter,
+                                    local_port_input,
+                                    https_port_input,
+                                } => {
+                                    render_tailscale_services(
+                                        &mut child_ui,
+                                        filter,
+                                        local_port_input,
+                                        https_port_input,
+                                        dashboard,
+                                        send_msg,
+                                    );
                                 }
                                 PaneKind::FileTracker(tracker) => {
                                     if let Some(req) = tracker.ui(&mut child_ui, send_msg) {

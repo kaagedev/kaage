@@ -24,6 +24,7 @@ pub enum TrackerAction {
     OpenAiJobs,
     OpenHttpPorts,
     OpenTailscale,
+    OpenTailscaleServices,
     OpenFileTracker,
     OpenHelp,
     OpenSettings,
@@ -251,6 +252,7 @@ impl BeTrackerSidebar {
                         let peer_online = dashboard
                             .map(|d| d.tailscale.peers.iter().filter(|p| p.online).count())
                             .unwrap_or(0);
+                        let ts_exposed = dashboard.map(|d| d.tailscale.serves.len()).unwrap_or(0);
                         let gpu_count = dashboard.map(|d| d.gpus.len()).unwrap_or(0);
 
                         section_head(ui, "MONITORING & AI");
@@ -262,6 +264,9 @@ impl BeTrackerSidebar {
                         }
                         if tracker_row(ui, "ComfyUI & Unsloth", Some(ai_active), false) {
                             action = Some(TrackerAction::OpenAiJobs);
+                        }
+                        if tracker_row(ui, "Tailscale Services", Some(ts_exposed), false) {
+                            action = Some(TrackerAction::OpenTailscaleServices);
                         }
                         if tracker_row(ui, "HTTP Ports", Some(port_count), false) {
                             action = Some(TrackerAction::OpenHttpPorts);
@@ -311,6 +316,7 @@ impl BeTrackerSidebar {
                                     PaneKind::AiJobs => "AI",
                                     PaneKind::HttpPorts { .. } => "NET",
                                     PaneKind::TailscalePanel => "TS",
+                                    PaneKind::TailscaleServices { .. } => "TSV",
                                     PaneKind::FileTracker(_) => "TRK",
                                     PaneKind::Vitals(_) => "VIT",
                                     PaneKind::Help(_) => "?",

@@ -117,6 +117,15 @@ impl KaageApp {
             Pos2::new(stage_x, TOPBAR_HEIGHT + 12.0),
             Vec2::new(720.0, 420.0),
         );
+        wm.add_tab_to_group(
+            ops_gid,
+            "Tailscale Services".into(),
+            PaneKind::TailscaleServices {
+                filter: String::new(),
+                local_port_input: String::new(),
+                https_port_input: String::new(),
+            },
+        );
         wm.add_tab_to_group(ops_gid, "HTTP Ports".into(), PaneKind::HttpPorts { filter: String::new() });
         wm.add_tab_to_group(ops_gid, "Tailscale".into(), PaneKind::TailscalePanel);
 
@@ -321,6 +330,25 @@ impl KaageApp {
                 PaneKind::TailscalePanel,
                 self.stage_origin(60.0, 60.0),
                 Vec2::new(660.0, 420.0),
+            );
+        }
+        self.send_client_msg(ClientMsg::RefreshDashboard);
+    }
+
+    fn open_tailscale_services(&mut self) {
+        if !self
+            .wm
+            .focus_matching_tab(|k| matches!(k, PaneKind::TailscaleServices { .. }))
+        {
+            self.wm.open_window(
+                "Tailscale Services".into(),
+                PaneKind::TailscaleServices {
+                    filter: String::new(),
+                    local_port_input: String::new(),
+                    https_port_input: String::new(),
+                },
+                self.stage_origin(48.0, 40.0),
+                Vec2::new(720.0, 500.0),
             );
         }
         self.send_client_msg(ClientMsg::RefreshDashboard);
@@ -659,6 +687,7 @@ impl eframe::App for KaageApp {
                     TrackerAction::OpenAiJobs => self.open_ai_jobs(),
                     TrackerAction::OpenHttpPorts => self.open_http_ports(),
                     TrackerAction::OpenTailscale => self.open_tailscale(),
+                    TrackerAction::OpenTailscaleServices => self.open_tailscale_services(),
                     TrackerAction::OpenFileTracker => self.open_file_tracker(),
                     TrackerAction::OpenHelp => self.open_help(),
                     TrackerAction::OpenSettings => self.open_settings(),
@@ -740,8 +769,8 @@ impl eframe::App for KaageApp {
                     self.send_client_msg(ClientMsg::ListUnits);
                 }
                 DeskbarAction::OpenVitals => self.open_vitals(),
-                DeskbarAction::OpenHttpPorts => self.open_http_ports(),
                 DeskbarAction::OpenTailscale => self.open_tailscale(),
+                DeskbarAction::OpenTailscaleServices => self.open_tailscale_services(),
                 DeskbarAction::OpenHelp => self.open_help(),
                 DeskbarAction::OpenSettings => self.open_settings(),
             }
@@ -762,6 +791,7 @@ impl eframe::App for KaageApp {
                 PaletteAction::OpenAiJobs => self.open_ai_jobs(),
                 PaletteAction::OpenHttpPorts => self.open_http_ports(),
                 PaletteAction::OpenTailscale => self.open_tailscale(),
+                PaletteAction::OpenTailscaleServices => self.open_tailscale_services(),
                 PaletteAction::OpenContainers => self.open_containers_window(),
                 PaletteAction::OpenHelp => self.open_help(),
                 PaletteAction::OpenSettings => self.open_settings(),

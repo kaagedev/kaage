@@ -588,21 +588,76 @@ async fn collect_tailscale() -> TailscaleInfo {
     info
 }
 
+pub async fn register_tailscale_serve(https_port: u16, local_port: u16) -> Result<String, String> {
+    if https_port == 0 || local_port == 0 {
+        return Err("Ports must be between 1 and 65535".into());
+    }
+    let https_arg = format!("--https={https_port}");
+    let target = format!("http://127.0.0.1:{local_port}");
+    let out = Command::new("tailscale")
+        .args(["serve", "--bg", &https_arg, &target])
+        .output()
+        .await
+        .map_err(|e| format!("Failed to invoke tailscale: {e}"))?;
+    if out.status.success() {
+        Ok(format!(
+            "Exposed local :{local_port} on Tailscale HTTPS :{https_port}"
+        ))
+    } else {
+        let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
+        let stdout = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        Err(if !stderr.is_empty() { stderr } else { stdout })
+    }
+}
+
+pub async fn unregister_tailscale_serve(https_port: u16) -> Result<String, String> {
+    if https_port == 0 {
+        return Err("HTTPS port must be between 1 and 65535".into());
+    }
+    let https_arg = format!("--https={https_port}");
+    let out = Command::new("tailscale")
+        .args(["serve", &https_arg, "off"])
+        .output()
+        .await
+        .map_err(|e| format!("Failed to invoke tailscale: {e}"))?;
+    if out.status.success() {
+        Ok(format!("Unregistered Tailscale HTTPS :{https_port}"))
+    } else {
+        let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
+        let stdout = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        Err(if !stderr.is_empty() { stderr } else { stdout })
+    }
+}
+
 pub fn parse_tailscale_serve_status(text: &str) -> Vec<TailscaleServeEntry> {
     let mut entries = Vec::new();
-    let mut current_url: Option<String> = None;
+    let mut current_url: Option<(String, bool)> = None;
 
     for line in text.lines() {
         let trimmed = line.trim();
         if trimmed.starts_with("https://") || trimmed.starts_with("http://") {
             let url = trimmed.split_whitespace().next().unwrap_or(trimmed);
-            current_url = Some(url.to_string());
+            let funnel = trimmed.to_ascii_lowercase().contains("funnel on");
+            current_url = Some((url.to_string(), funnel));
         } else if let Some(idx) = trimmed.find("proxy ") {
             let target = trimmed[idx + 6..].trim().to_string();
-            if let Some(ref url) = current_url {
+            let prefix = trimmed[..idx].trim();
+            let mount_path = prefix
+                .trim_start_matches("|--")
+                .trim_start_matches("`--")
+                .trim()
+                .to_string();
+            let mount_path = if mount_path.is_empty() {
+                "/".to_string()
+            } else {
+                mount_path
+            };
+            if let Some((ref url, funnel)) = current_url {
                 entries.push(TailscaleServeEntry {
                     https_url: url.clone(),
                     target,
+                    mount_path,
+                    funnel,
                 });
             }
         }
@@ -767,6 +822,8 @@ https://aihole-1.greyhound-goby.ts.net:9090 (tailnet only)
             "https://aihole-1.greyhound-goby.ts.net:8188"
         );
         assert_eq!(entries[0].target, "http://127.0.0.1:8188");
+        assert_eq!(entries[0].mount_path, "/");
+        assert!(!entries[0].funnel);
         let port_map = build_serve_port_map(&entries);
         assert_eq!(
             port_map.get(&9090).map(String::as_str),
