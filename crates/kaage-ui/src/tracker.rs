@@ -23,6 +23,7 @@ pub enum TrackerAction {
     },
     OpenContainers,
     OpenSystemMonitor,
+    OpenVitals,
     OpenBottom,
     OpenAiJobs,
     OpenHttpPorts,
@@ -266,6 +267,9 @@ impl BeTrackerSidebar {
                         let gpu_count = dashboard.map(|d| d.gpus.len()).unwrap_or(0);
 
                         section_head(ui, "MONITORING & AI");
+                        if tracker_row(ui, "Vitals (Telemetry)", None, false) {
+                            action = Some(TrackerAction::OpenVitals);
+                        }
                         if tracker_row(ui, "GPU / CPU / Memory", Some(gpu_count), false) {
                             action = Some(TrackerAction::OpenSystemMonitor);
                         }
@@ -318,6 +322,7 @@ impl BeTrackerSidebar {
                                     PaneKind::HttpPorts { .. } => "NET",
                                     PaneKind::TailscalePanel => "TS",
                                     PaneKind::FileTracker(_) => "TRK",
+                                    PaneKind::Vitals(_) => "VIT",
                                 };
                                 let label = format!("[{badge}] {}", tab.title);
                                 if tracker_row(ui, &label, None, false) {

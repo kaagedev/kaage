@@ -10,6 +10,7 @@ use crate::terminal::TerminalPane;
 use crate::theme::{
     BEOS_PANEL_GRAY, BEOS_TAB_INACTIVE, BEOS_TAB_YELLOW, TOPBAR_HEIGHT, draw_beos_bevel,
 };
+use crate::vitals::{VitalsSpawnRequest, VitalsWindow};
 use egui::{Color32, CornerRadius, Id, Pos2, Rect, Sense, Vec2};
 use kaage_proto::{
     ClientMsg, ContainerInfo, DashboardSnapshot, NixosInfo, SystemdUnitInfo, SystemdUnitStatus,
@@ -32,6 +33,7 @@ pub enum PaneKind {
     },
     TailscalePanel,
     FileTracker(Box<TrackerWindow>),
+    Vitals(Box<VitalsWindow>),
 }
 
 pub struct BeTab {
@@ -447,6 +449,27 @@ impl BeWindowManager {
                                                 );
                                             }
                                             TrackerSpawnRequest::OpenUnitLogs { unit } => {
+                                                spawn_requests.push(
+                                                    InspectorSpawnRequest::OpenCommandTab {
+                                                        title: format!("logs: {unit}"),
+                                                        cmd: vec![
+                                                            "journalctl".into(),
+                                                            "-u".into(),
+                                                            unit,
+                                                            "-n".into(),
+                                                            "100".into(),
+                                                            "-f".into(),
+                                                        ],
+                                                    },
+                                                );
+                                            }
+                                        }
+                                    }
+                                }
+                                PaneKind::Vitals(vitals) => {
+                                    if let Some(req) = vitals.ui(&mut child_ui, send_msg) {
+                                        match req {
+                                            VitalsSpawnRequest::OpenUnitLogs { unit } => {
                                                 spawn_requests.push(
                                                     InspectorSpawnRequest::OpenCommandTab {
                                                         title: format!("logs: {unit}"),

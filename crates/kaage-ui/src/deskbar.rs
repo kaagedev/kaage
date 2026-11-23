@@ -7,7 +7,7 @@ use crate::theme::{
 };
 use crate::wm::{BeWindowGroup, PaneKind};
 use egui::{Color32, CornerRadius, Id, Pos2, Rect, Sense, Stroke, Vec2};
-use kaage_proto::{HostMetrics, NixosInfo, SystemdUnitInfo};
+use kaage_proto::{HostMetrics, NixosInfo, SystemdUnitInfo, VitalsTick};
 
 pub struct BeDeskbar {
     pub menu_open: bool,
@@ -24,6 +24,7 @@ pub enum DeskbarAction {
     },
     OpenDockerInspector,
     OpenSystemMonitor,
+    OpenVitals,
     OpenBottom,
     OpenAiJobs,
     OpenHttpPorts,
@@ -49,6 +50,7 @@ impl BeDeskbar {
         ctx: &egui::Context,
         nixos: Option<&NixosInfo>,
         metrics: Option<&HostMetrics>,
+        latest_vital: Option<&VitalsTick>,
         units: &[SystemdUnitInfo],
         connected: bool,
         tracker_visible: bool,
@@ -198,27 +200,49 @@ impl BeDeskbar {
                         } else {
                             0.0
                         };
+                        let gpu_frac = latest_vital
+                            .map(|v| {
+                                if let Some(u) = v.gpu_util_percent {
+                                    (u / 100.0).clamp(0.0, 1.0)
+                                } else if v.gpu_vram_total_mb > 0 {
+                                    (v.gpu_vram_used_mb as f32 / v.gpu_vram_total_mb as f32)
+                                        .clamp(0.0, 1.0)
+                                } else {
+                                    0.0
+                                }
+                            })
+                            .unwrap_or(0.0);
                         let bar_x = meters_rect.min.x + 17.0;
                         let bar_w = 54.0;
                         let cpu_bar = Rect::from_min_size(
-                            Pos2::new(bar_x, meters_rect.min.y + 4.0),
-                            Vec2::new(bar_w, 5.5),
+                            Pos2::new(bar_x, meters_rect.min.y + 3.0),
+                            Vec2::new(bar_w, 4.0),
                         );
                         painter.rect_filled(cpu_bar, CornerRadius::ZERO, Color32::from_rgb(70, 70, 70));
                         painter.rect_filled(
-                            Rect::from_min_size(cpu_bar.min, Vec2::new(bar_w * cpu_frac, 5.5)),
+                            Rect::from_min_size(cpu_bar.min, Vec2::new(bar_w * cpu_frac, 4.0)),
                             CornerRadius::ZERO,
                             BEOS_STATUS_GREEN,
                         );
                         let mem_bar = Rect::from_min_size(
-                            Pos2::new(bar_x, meters_rect.min.y + 12.0),
-                            Vec2::new(bar_w, 5.5),
+                            Pos2::new(bar_x, meters_rect.min.y + 9.0),
+                            Vec2::new(bar_w, 4.0),
                         );
                         painter.rect_filled(mem_bar, CornerRadius::ZERO, Color32::from_rgb(70, 70, 70));
                         painter.rect_filled(
-                            Rect::from_min_size(mem_bar.min, Vec2::new(bar_w * mem_frac, 5.5)),
+                            Rect::from_min_size(mem_bar.min, Vec2::new(bar_w * mem_frac, 4.0)),
                             CornerRadius::ZERO,
                             BEOS_TAB_YELLOW,
+                        );
+                        let gpu_bar = Rect::from_min_size(
+                            Pos2::new(bar_x, meters_rect.min.y + 15.0),
+                            Vec2::new(bar_w, 4.0),
+                        );
+                        painter.rect_filled(gpu_bar, CornerRadius::ZERO, Color32::from_rgb(70, 70, 70));
+                        painter.rect_filled(
+                            Rect::from_min_size(gpu_bar.min, Vec2::new(bar_w * gpu_frac, 4.0)),
+                            CornerRadius::ZERO,
+                            Color32::from_rgb(76, 168, 240),
                         );
                         painter.text(
                             Pos2::new(meters_rect.max.x - 5.0, meters_rect.center().y),
@@ -227,15 +251,28 @@ impl BeDeskbar {
                             egui::FontId::monospace(10.5),
                             Color32::BLACK,
                         );
-                        ui.interact(meters_rect, Id::unique("topbar_metrics"), Sense::hover())
+                        let gpu_tip = latest_vital
+                            .map(|v| {
+                                format!(
+                                    "\nGPU VRAM: {} / {} MiB",
+                                    v.gpu_vram_used_mb, v.gpu_vram_total_mb
+                                )
+                            })
+                            .unwrap_or_default();
+                        if ui
+                            .interact(meters_rect, Id::unique("topbar_metrics"), Sense::click())
                             .on_hover_text(format!(
-                                "{}\nCPU: {:.1}%\nRAM: {} / {} MiB\nUptime: {}",
+                                "{}\nCPU: {:.1}%\nRAM: {} / {} MiB{gpu_tip}\nUptime: {}\n(Click to open Vitals)",
                                 m.hostname,
                                 m.cpu_percent,
                                 m.mem_used_mb,
                                 m.mem_total_mb,
                                 format_uptime(m.uptime_secs),
-                            ));
+                            ))
+                            .clicked()
+                        {
+                            action = Some(DeskbarAction::OpenVitals);
+                        }
                     } else {
                         painter.text(
                             Pos2::new(meters_rect.max.x - 6.0, meters_rect.center().y),
@@ -344,6 +381,7 @@ impl BeDeskbar {
                             PaneKind::HttpPorts { .. } => "NET",
                             PaneKind::TailscalePanel => "TS",
                             PaneKind::FileTracker(_) => "TRK",
+                            PaneKind::Vitals(_) => "VIT",
                         };
                         let short_title: String = tab.title.chars().take(18).collect();
                         let label = format!("[{badge}] {short_title}");
@@ -417,6 +455,7 @@ impl BeDeskbar {
                         ),
                         ("Containers", "CTR", DeskbarAction::OpenDockerInspector),
                         ("GPU / CPU / Memory", "MON", DeskbarAction::OpenSystemMonitor),
+                        ("Vitals (Telemetry)", "VIT", DeskbarAction::OpenVitals),
                         ("Bottom (btm)", "BTM", DeskbarAction::OpenBottom),
                         ("ComfyUI & Unsloth", "AI", DeskbarAction::OpenAiJobs),
                         ("HTTP Ports", "NET", DeskbarAction::OpenHttpPorts),

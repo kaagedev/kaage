@@ -169,6 +169,10 @@ pub async fn collect_dashboard_snapshot() -> DashboardSnapshot {
     }
 }
 
+pub async fn http_get_local_pub(base_url: &str, path: &str) -> Result<String, String> {
+    http_get_local(base_url, path).await
+}
+
 async fn http_get_local(base_url: &str, path: &str) -> Result<String, String> {
     let stripped = base_url
         .trim()

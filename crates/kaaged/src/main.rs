@@ -1,6 +1,7 @@
 mod files;
 mod nixos;
 mod telemetry;
+mod vitals;
 
 use axum::{
     Json, Router,
@@ -49,6 +50,7 @@ struct AppState {
     user_dbus: RwLock<Option<zbus::Connection>>,
     allow_system_backends: bool,
     docker: Option<Docker>,
+    vitals: Arc<vitals::VitalsCollector>,
     dist_dir: PathBuf,
 }
 
@@ -94,6 +96,7 @@ fn build_router(state: Arc<AppState>) -> Router {
         .route("/api/v1/nixos", get(http_nixos))
         .route("/api/v1/metrics", get(http_metrics))
         .route("/api/v1/dashboard", get(http_dashboard))
+        .route("/api/v1/vitals", get(http_vitals))
         .route("/api/v1/units", get(http_list_units))
         .route("/api/v1/units/{unit}", get(http_unit_status))
         .route("/api/v1/units/{unit}/status", get(http_unit_status))
@@ -168,6 +171,9 @@ async fn main() {
         tracing::warn!("KAAGE_ALLOWED_USER not set; running without Tailscale-User-Login check");
     }
 
+    let vitals = vitals::VitalsCollector::new();
+    vitals.spawn_background();
+
     let state = Arc::new(AppState {
         allowed_user,
         nixos,
@@ -175,6 +181,7 @@ async fn main() {
         user_dbus: RwLock::new(user_dbus),
         allow_system_backends: true,
         docker,
+        vitals,
         dist_dir: dist_dir.clone(),
     });
 
@@ -308,6 +315,37 @@ async fn http_nixos(
         return (StatusCode::UNAUTHORIZED, "Unauthorized").into_response();
     }
     Json(state.nixos.clone()).into_response()
+}
+
+#[derive(Deserialize, Default)]
+struct VitalsHttpQuery {
+    window: Option<String>,
+    buckets: Option<u16>,
+}
+
+async fn http_vitals(
+    headers: HeaderMap,
+    Query(q): Query<VitalsHttpQuery>,
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    if !check_auth(&headers, &state.allowed_user) {
+        return (StatusCode::UNAUTHORIZED, "Unauthorized").into_response();
+    }
+    let window = match q.window.as_deref().unwrap_or("5m") {
+        "1m" => kaage_proto::VitalsWindow::Min1,
+        "15m" => kaage_proto::VitalsWindow::Min15,
+        "1h" => kaage_proto::VitalsWindow::Hour1,
+        "6h" => kaage_proto::VitalsWindow::Hour6,
+        "24h" => kaage_proto::VitalsWindow::Hour24,
+        _ => kaage_proto::VitalsWindow::Min5,
+    };
+    let query = kaage_proto::VitalsQuery {
+        window,
+        buckets: q.buckets.unwrap_or(120),
+        start_ts: None,
+        end_ts: None,
+    };
+    Json(state.vitals.query_snapshot(&query)).into_response()
 }
 
 async fn http_dashboard(
@@ -572,6 +610,17 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
                 break;
             }
             tokio::time::sleep(Duration::from_secs(4)).await;
+        }
+    });
+
+    // Forward 1s live VitalsTick stream to this WebSocket client
+    let vitals_tx = out_tx.clone();
+    let mut vitals_rx = state.vitals.subscribe();
+    let vitals_task = tokio::spawn(async move {
+        while let Ok(tick) = vitals_rx.recv().await {
+            if vitals_tx.send(ServerMsg::VitalsTick(tick)).is_err() {
+                break;
+            }
         }
     });
 
@@ -914,11 +963,35 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
                     }
                 });
             }
+            ClientMsg::QueryVitals(q) => {
+                let snap = state.vitals.query_snapshot(&q);
+                let _ = out_tx.send(ServerMsg::VitalsSnapshot(snap));
+            }
+            ClientMsg::SignalProcess { pid, signal } => {
+                let tx = out_tx.clone();
+                tokio::task::spawn_blocking(move || match vitals::signal_process(pid, signal) {
+                    Ok(msg) => {
+                        let _ = tx.send(ServerMsg::ActionFeedback {
+                            target: format!("pid:{pid}"),
+                            ok: true,
+                            message: msg,
+                        });
+                    }
+                    Err(err) => {
+                        let _ = tx.send(ServerMsg::ActionFeedback {
+                            target: format!("pid:{pid}"),
+                            ok: false,
+                            message: err,
+                        });
+                    }
+                });
+            }
         }
     }
 
     // Kill and clean up any live PTY child processes on disconnect
     ptys.lock().unwrap().clear();
+    vitals_task.abort();
     dash_task.abort();
     metrics_task.abort();
     send_task.abort();
@@ -1297,6 +1370,7 @@ mod tests {
             user_dbus: RwLock::new(None),
             allow_system_backends: false,
             docker: None,
+            vitals: vitals::VitalsCollector::new(),
             dist_dir: PathBuf::from("dist"),
         })
     }

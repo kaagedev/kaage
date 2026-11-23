@@ -7,6 +7,7 @@ mod panels;
 mod terminal;
 mod theme;
 mod tracker;
+mod vitals;
 mod wm;
 
 use deskbar::{BeDeskbar, DeskbarAction};
@@ -17,7 +18,7 @@ use file_tracker::TrackerWindow;
 use inspectors::{InspectorSpawnRequest, ScopeFilter, StateFilter};
 use kaage_proto::{
     ClientMsg, ContainerInfo, DashboardSnapshot, HostMetrics, NixosInfo, ServerMsg,
-    SystemdUnitInfo, SystemdUnitStatus,
+    SystemdUnitInfo, SystemdUnitStatus, VitalsTick,
 };
 use terminal::TerminalPane;
 use theme::{
@@ -25,6 +26,7 @@ use theme::{
     apply_beos_style, draw_beos_bevel,
 };
 use tracker::{BeTrackerSidebar, TrackerAction};
+use vitals::VitalsWindow;
 use wm::{BeWindowManager, PaneKind};
 
 const WALLPAPER_BYTES: &[u8] = include_bytes!("../../../assets/kaage-wallpaper.jpg");
@@ -46,6 +48,7 @@ struct KaageApp {
     tracker: BeTrackerSidebar,
     nixos: Option<NixosInfo>,
     metrics: Option<HostMetrics>,
+    latest_vital: Option<VitalsTick>,
     dashboard: Option<DashboardSnapshot>,
     cpu_history: Vec<f32>,
     mem_history: Vec<f32>,
@@ -126,6 +129,7 @@ impl KaageApp {
             tracker,
             nixos: None,
             metrics: None,
+            latest_vital: None,
             dashboard: None,
             cpu_history: Vec::with_capacity(MAX_HISTORY_SAMPLES),
             mem_history: Vec::with_capacity(MAX_HISTORY_SAMPLES),
@@ -318,6 +322,26 @@ impl KaageApp {
         );
     }
 
+    fn open_vitals(&mut self) {
+        if self
+            .wm
+            .focus_matching_tab(|k| matches!(k, PaneKind::Vitals(_)))
+        {
+            return;
+        }
+        let mut pending = Vec::new();
+        let vitals = VitalsWindow::new(&mut |msg| pending.push(msg));
+        for msg in pending {
+            self.send_client_msg(msg);
+        }
+        self.wm.open_window(
+            "Kaage Vitals".into(),
+            PaneKind::Vitals(Box::new(vitals)),
+            self.stage_origin(20.0, 16.0),
+            Vec2::new(940.0, 620.0),
+        );
+    }
+
     fn push_history(buf: &mut Vec<f32>, val: f32) {
         if buf.len() >= MAX_HISTORY_SAMPLES {
             buf.remove(0);
@@ -363,6 +387,30 @@ impl eframe::App for KaageApp {
                             }
                             ServerMsg::Dashboard(d) => {
                                 self.dashboard = Some(d);
+                            }
+                            ServerMsg::VitalsTick(tick) => {
+                                self.latest_vital = Some(tick.clone());
+                                let mut pending = Vec::new();
+                                for group in &mut self.wm.groups {
+                                    for tab in &mut group.tabs {
+                                        if let PaneKind::Vitals(v) = &mut tab.kind {
+                                            v.on_live_tick(tick.clone(), &mut |m| pending.push(m));
+                                        }
+                                    }
+                                }
+                                for m in pending {
+                                    self.send_client_msg(m);
+                                }
+                            }
+                            ServerMsg::VitalsSnapshot(snap) => {
+                                self.latest_vital = Some(snap.latest.clone());
+                                for group in &mut self.wm.groups {
+                                    for tab in &mut group.tabs {
+                                        if let PaneKind::Vitals(v) = &mut tab.kind {
+                                            v.on_snapshot(snap.clone());
+                                        }
+                                    }
+                                }
                             }
                             ServerMsg::UnitsSnapshot(u) => self.units = u,
                             ServerMsg::UnitStatus(st) => self.selected_unit_status = Some(st),
@@ -473,6 +521,7 @@ impl eframe::App for KaageApp {
         if let Some(icon_act) = show_desktop_icons(&ctx) {
             match icon_act {
                 DesktopIconAction::OpenFileTracker => self.open_file_tracker(),
+                DesktopIconAction::OpenVitals => self.open_vitals(),
                 DesktopIconAction::OpenHostServices => {
                     self.wm.open_or_focus_systemd(
                         ScopeFilter::All,
@@ -516,6 +565,7 @@ impl eframe::App for KaageApp {
                 }
                 TrackerAction::OpenContainers => self.open_containers_window(),
                 TrackerAction::OpenSystemMonitor => self.open_system_monitor(),
+                TrackerAction::OpenVitals => self.open_vitals(),
                 TrackerAction::OpenBottom => self.open_bottom(),
                 TrackerAction::OpenAiJobs => self.open_ai_jobs(),
                 TrackerAction::OpenHttpPorts => self.open_http_ports(),
@@ -579,6 +629,7 @@ impl eframe::App for KaageApp {
             &ctx,
             self.nixos.as_ref(),
             self.metrics.as_ref(),
+            self.latest_vital.as_ref(),
             &self.units,
             self.connected,
             self.tracker.visible,
@@ -602,6 +653,7 @@ impl eframe::App for KaageApp {
                 }
                 DeskbarAction::OpenDockerInspector => self.open_containers_window(),
                 DeskbarAction::OpenSystemMonitor => self.open_system_monitor(),
+                DeskbarAction::OpenVitals => self.open_vitals(),
                 DeskbarAction::OpenBottom => self.open_bottom(),
                 DeskbarAction::OpenAiJobs => self.open_ai_jobs(),
                 DeskbarAction::OpenHttpPorts => self.open_http_ports(),

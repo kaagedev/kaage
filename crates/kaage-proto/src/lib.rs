@@ -303,6 +303,189 @@ pub enum FileOp {
     },
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum VitalsWindow {
+    Min1,
+    #[default]
+    Min5,
+    Min15,
+    Hour1,
+    Hour6,
+    Hour24,
+}
+
+impl VitalsWindow {
+    pub fn secs(self) -> u64 {
+        match self {
+            Self::Min1 => 60,
+            Self::Min5 => 300,
+            Self::Min15 => 900,
+            Self::Hour1 => 3_600,
+            Self::Hour6 => 21_600,
+            Self::Hour24 => 86_400,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Min1 => "1m",
+            Self::Min5 => "5m",
+            Self::Min15 => "15m",
+            Self::Hour1 => "1h",
+            Self::Hour6 => "6h",
+            Self::Hour24 => "24h",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VitalsQuery {
+    pub window: VitalsWindow,
+    pub buckets: u16,
+    pub start_ts: Option<i64>,
+    pub end_ts: Option<i64>,
+}
+
+impl Default for VitalsQuery {
+    fn default() -> Self {
+        Self {
+            window: VitalsWindow::Min5,
+            buckets: 120,
+            start_ts: None,
+            end_ts: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ProcessSignal {
+    Term,
+    Kill,
+    Renice(i32),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GpuProcessVital {
+    pub pid: u32,
+    pub name: String,
+    pub vram_mb: u64,
+    pub unit: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct GpuVital {
+    pub name: String,
+    pub utilization_percent: Option<f32>,
+    pub vram_used_mb: u64,
+    pub vram_total_mb: u64,
+    pub temperature_c: Option<f32>,
+    pub power_draw_w: Option<f32>,
+    pub power_limit_w: Option<f32>,
+    pub source: String,
+    pub top_processes: Vec<GpuProcessVital>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, Default)]
+pub struct PsiMetric {
+    pub some_avg10: f32,
+    pub some_avg60: f32,
+    pub full_avg10: f32,
+    pub full_avg60: f32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, Default)]
+pub struct KernelPsi {
+    pub cpu: PsiMetric,
+    pub memory: PsiMetric,
+    pub io: PsiMetric,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MountVital {
+    pub mount_point: String,
+    pub fs_type: String,
+    pub used_gb: f32,
+    pub total_gb: f32,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct NicVital {
+    pub name: String,
+    pub is_tailscale: bool,
+    pub rx_kbps: f32,
+    pub tx_kbps: f32,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ProcessVital {
+    pub pid: u32,
+    pub name: String,
+    pub unit: Option<String>,
+    pub cpu_percent: f32,
+    pub mem_mb: u64,
+    pub disk_read_kbps: f32,
+    pub disk_write_kbps: f32,
+    pub vram_mb: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct VitalsTick {
+    pub ts: i64,
+    pub cpu_percent: f32,
+    pub cpu_cores: Vec<f32>,
+    pub cpu_freq_ghz: f32,
+    pub cpu_temp_c: Option<f32>,
+    pub load_avg: [f32; 3],
+    pub mem_used_mb: u64,
+    pub mem_total_mb: u64,
+    pub swap_used_mb: u64,
+    pub swap_total_mb: u64,
+    pub disk_read_kbps: f32,
+    pub disk_write_kbps: f32,
+    pub disk_iops: u32,
+    pub net_rx_kbps: f32,
+    pub net_tx_kbps: f32,
+    pub tailscale_rx_kbps: f32,
+    pub tailscale_tx_kbps: f32,
+    pub gpu_util_percent: Option<f32>,
+    pub gpu_vram_used_mb: u64,
+    pub gpu_vram_total_mb: u64,
+    pub top_cpu_label: String,
+    pub top_ram_label: String,
+    pub top_disk_label: String,
+    pub top_gpu_label: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct VitalsBucket {
+    pub ts_start: i64,
+    pub ts_end: i64,
+    pub cpu_avg: f32,
+    pub cpu_max: f32,
+    pub mem_pct_avg: f32,
+    pub gpu_util_avg: f32,
+    pub gpu_vram_pct_avg: f32,
+    pub disk_read_kbps: f32,
+    pub disk_write_kbps: f32,
+    pub net_rx_kbps: f32,
+    pub net_tx_kbps: f32,
+    pub ts_rx_kbps: f32,
+    pub ts_tx_kbps: f32,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct VitalsSnapshot {
+    pub latest: VitalsTick,
+    pub buckets: Vec<VitalsBucket>,
+    pub gpus: Vec<GpuVital>,
+    pub psi: KernelPsi,
+    pub alerts: Vec<String>,
+    pub mounts: Vec<MountVital>,
+    pub nics: Vec<NicVital>,
+    pub processes: Vec<ProcessVital>,
+    pub history_span_secs: u64,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ClientMsg {
     ListUnits,
@@ -362,6 +545,11 @@ pub enum ClientMsg {
     },
     ListWorkspaces,
     SaveWorkspace(WorkspaceDef),
+    QueryVitals(VitalsQuery),
+    SignalProcess {
+        pid: u32,
+        signal: ProcessSignal,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -369,6 +557,8 @@ pub enum ServerMsg {
     NixosInfo(NixosInfo),
     Metrics(HostMetrics),
     Dashboard(DashboardSnapshot),
+    VitalsTick(VitalsTick),
+    VitalsSnapshot(VitalsSnapshot),
     UnitsSnapshot(Vec<SystemdUnitInfo>),
     UnitStatus(SystemdUnitStatus),
     ContainersSnapshot(Vec<ContainerInfo>),

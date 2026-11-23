@@ -5,6 +5,7 @@ use egui::{Color32, CornerRadius, Id, Pos2, Rect, Sense, Stroke, Vec2};
 
 pub enum DesktopIconAction {
     OpenFileTracker,
+    OpenVitals,
     OpenHostServices,
     OpenSystemMonitor,
     OpenBottom,
@@ -31,6 +32,7 @@ pub fn show_desktop_icons(ctx: &egui::Context) -> Option<DesktopIconAction> {
         .show(ctx, |ui| {
             let items = [
                 ("Tracker", IconKind::Folder, DesktopIconAction::OpenFileTracker),
+                ("Vitals", IconKind::Disk, DesktopIconAction::OpenVitals),
                 ("Services", IconKind::Disk, DesktopIconAction::OpenHostServices),
                 ("Monitor", IconKind::Disk, DesktopIconAction::OpenSystemMonitor),
                 ("Bottom", IconKind::Terminal, DesktopIconAction::OpenBottom),
