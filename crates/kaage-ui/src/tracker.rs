@@ -1,8 +1,5 @@
 use crate::inspectors::{ScopeFilter, StateFilter};
-use crate::theme::{
-    BEOS_BEVEL_DARK, BEOS_BEVEL_LIGHT, BEOS_BORDER_BLACK, BEOS_PANEL_GRAY, BEOS_STATUS_RED,
-    BEOS_TAB_YELLOW, BEOS_WELL_WHITE, TOPBAR_HEIGHT, be_button, draw_beos_bevel,
-};
+use crate::theme::{TOPBAR_HEIGHT, be_button, draw_beos_bevel, palette};
 use crate::wm::{BeWindowGroup, PaneKind};
 use egui::{Color32, CornerRadius, Id, Pos2, Rect, RichText, ScrollArea, Sense, Stroke, Vec2};
 use kaage_proto::{
@@ -71,24 +68,32 @@ impl BeTrackerSidebar {
             return None;
         }
 
+        let p = palette();
         let mut action = None;
         let screen = ctx.content_rect();
         let width = self.width();
-        let origin = Pos2::new(10.0, TOPBAR_HEIGHT + 10.0);
-        let tab_h = 21.0;
-        let body_h = (screen.height() - TOPBAR_HEIGHT - tab_h - 22.0).max(240.0);
+        let origin = Pos2::new(8.0, TOPBAR_HEIGHT + 8.0);
+        let tab_h = 22.0;
+        let body_h = (screen.height() - TOPBAR_HEIGHT - tab_h - 16.0).max(240.0);
 
         egui::Area::new(Id::unique("kaage_tracker_sidebar"))
             .fixed_pos(origin)
             .order(egui::Order::Middle)
             .show(ctx, |ui| {
-                // Classic BeOS Yellow Tab for Tracker
+                // Header Tab for Tracker Sidebar
                 let tab_w = 152.0_f32.min(width);
                 let tab_rect = Rect::from_min_size(origin, Vec2::new(tab_w, tab_h + 1.0));
                 {
                     let painter = ui.painter();
-                    painter.rect_filled(tab_rect, CornerRadius::ZERO, BEOS_TAB_YELLOW);
+                    painter.rect_filled(tab_rect, CornerRadius::ZERO, p.tab_active_bg);
                     draw_beos_bevel(painter, tab_rect, false);
+                    if p.is_dark {
+                        painter.rect_filled(
+                            Rect::from_min_size(tab_rect.min, Vec2::new(tab_rect.width(), 2.0)),
+                            CornerRadius::ZERO,
+                            p.accent,
+                        );
+                    }
                 }
 
                 // Close gadget (left)
@@ -99,7 +104,7 @@ impl BeTrackerSidebar {
                 draw_beos_bevel(ui.painter(), close_rect, false);
                 if ui
                     .interact(close_rect, Id::unique("tracker_close"), Sense::click())
-                    .on_hover_text("Hide Tracker window")
+                    .on_hover_text("Hide sidebar")
                     .clicked()
                 {
                     action = Some(TrackerAction::Hide);
@@ -113,7 +118,7 @@ impl BeTrackerSidebar {
                 draw_beos_bevel(ui.painter(), zoom_rect, self.wide);
                 if ui
                     .interact(zoom_rect, Id::unique("tracker_zoom"), Sense::click())
-                    .on_hover_text("Toggle Tracker width")
+                    .on_hover_text("Toggle sidebar width")
                     .clicked()
                 {
                     self.wide = !self.wide;
@@ -122,9 +127,9 @@ impl BeTrackerSidebar {
                 ui.painter().text(
                     Pos2::new(close_rect.max.x + 6.0, tab_rect.center().y),
                     egui::Align2::LEFT_CENTER,
-                    "Tracker — Host",
-                    egui::FontId::proportional(12.5),
-                    Color32::BLACK,
+                    "Host Nav",
+                    egui::FontId::proportional(12.0),
+                    p.tab_active_fg,
                 );
 
                 // Window Body
@@ -132,7 +137,7 @@ impl BeTrackerSidebar {
                 let body_rect = Rect::from_min_size(body_pos, Vec2::new(width, body_h));
                 {
                     let painter = ui.painter();
-                    painter.rect_filled(body_rect, CornerRadius::ZERO, BEOS_PANEL_GRAY);
+                    painter.rect_filled(body_rect, CornerRadius::ZERO, p.surface);
                     draw_beos_bevel(painter, body_rect, false);
                 }
 
@@ -158,12 +163,8 @@ impl BeTrackerSidebar {
                     })
                     .unwrap_or_else(|| "Linux Host".into());
                 header_ui.vertical(|ui| {
-                    ui.label(RichText::new(hostname).strong().size(12.5).color(Color32::BLACK));
-                    ui.label(
-                        RichText::new(subtitle)
-                            .size(10.0)
-                            .color(Color32::from_rgb(70, 70, 70)),
-                    );
+                    ui.label(RichText::new(hostname).strong().size(12.5).color(p.text));
+                    ui.label(RichText::new(subtitle).size(10.0).color(p.text_muted));
                 });
                 header_ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     ui.add_space(2.0);
@@ -172,7 +173,7 @@ impl BeTrackerSidebar {
                     }
                 });
 
-                // Recessed white Tracker well
+                // Recessed well
                 let status_h = 20.0;
                 let well_rect = Rect::from_min_max(
                     Pos2::new(body_rect.min.x + 4.0, header_rect.max.y + 2.0),
@@ -180,23 +181,8 @@ impl BeTrackerSidebar {
                 );
                 {
                     let painter = ui.painter();
-                    painter.rect_filled(well_rect, CornerRadius::ZERO, BEOS_WELL_WHITE);
-                    painter.line_segment(
-                        [well_rect.left_top(), well_rect.right_top()],
-                        Stroke::new(1.0, BEOS_BEVEL_DARK),
-                    );
-                    painter.line_segment(
-                        [well_rect.left_top(), well_rect.left_bottom()],
-                        Stroke::new(1.0, BEOS_BEVEL_DARK),
-                    );
-                    painter.line_segment(
-                        [well_rect.left_bottom(), well_rect.right_bottom()],
-                        Stroke::new(1.0, BEOS_BEVEL_LIGHT),
-                    );
-                    painter.line_segment(
-                        [well_rect.right_top(), well_rect.right_bottom()],
-                        Stroke::new(1.0, BEOS_BEVEL_LIGHT),
-                    );
+                    painter.rect_filled(well_rect, CornerRadius::ZERO, p.well);
+                    draw_beos_bevel(painter, well_rect, true);
                 }
 
                 let total_units = units.len();
@@ -342,17 +328,17 @@ impl BeTrackerSidebar {
                 );
                 {
                     let painter = ui.painter();
-                    painter.rect_filled(status_rect, CornerRadius::ZERO, Color32::from_rgb(208, 208, 208));
+                    painter.rect_filled(status_rect, CornerRadius::ZERO, p.surface_alt);
                     painter.line_segment(
                         [status_rect.left_top(), status_rect.right_top()],
-                        Stroke::new(1.0, BEOS_BEVEL_DARK),
+                        Stroke::new(1.0, p.border),
                     );
                     painter.text(
                         Pos2::new(status_rect.min.x + 6.0, status_rect.center().y),
                         egui::Align2::LEFT_CENTER,
                         format!("{running_units} run · {enabled_units} en · {total_units} svc"),
-                        egui::FontId::proportional(10.5),
-                        Color32::from_rgb(55, 55, 55),
+                        egui::FontId::monospace(10.0),
+                        p.text_muted,
                     );
                 }
             });
@@ -362,36 +348,34 @@ impl BeTrackerSidebar {
 }
 
 fn section_head(ui: &mut egui::Ui, title: &str) {
+    let p = palette();
     let width = ui.available_width();
     let (rect, _) = ui.allocate_exact_size(Vec2::new(width, 19.0), Sense::hover());
     let painter = ui.painter();
-    painter.rect_filled(rect, CornerRadius::ZERO, Color32::from_rgb(224, 224, 224));
+    painter.rect_filled(rect, CornerRadius::ZERO, p.section_bg);
     painter.line_segment(
         [rect.left_bottom(), rect.right_bottom()],
-        Stroke::new(1.0, Color32::from_rgb(176, 176, 176)),
+        Stroke::new(1.0, p.border),
     );
     painter.text(
         Pos2::new(rect.min.x + 6.0, rect.center().y),
         egui::Align2::LEFT_CENTER,
         title,
-        egui::FontId::proportional(10.0),
-        Color32::from_rgb(60, 65, 75),
+        egui::FontId::monospace(9.5),
+        p.text_muted,
     );
 }
 
 fn tracker_row(ui: &mut egui::Ui, label: &str, count: Option<usize>, alert: bool) -> bool {
+    let p = palette();
     let width = ui.available_width();
     let (rect, resp) = ui.allocate_exact_size(Vec2::new(width, 21.0), Sense::click());
     if ui.is_rect_visible(rect) {
         let painter = ui.painter();
         if resp.hovered() {
-            painter.rect_filled(rect, CornerRadius::ZERO, Color32::from_rgb(207, 224, 245));
+            painter.rect_filled(rect, CornerRadius::ZERO, p.hover_row);
         }
-        let text_color = if alert {
-            BEOS_STATUS_RED
-        } else {
-            Color32::BLACK
-        };
+        let text_color = if alert { p.status_red } else { p.text };
         painter.text(
             Pos2::new(rect.min.x + 8.0, rect.center().y),
             egui::Align2::LEFT_CENTER,
@@ -408,15 +392,15 @@ fn tracker_row(ui: &mut egui::Ui, label: &str, count: Option<usize>, alert: bool
                 pill,
                 CornerRadius::ZERO,
                 if alert {
-                    Color32::from_rgb(249, 216, 216)
+                    Color32::from_rgba_unmultiplied(239, 68, 68, 45)
                 } else {
-                    Color32::from_rgb(232, 232, 232)
+                    p.surface_alt
                 },
             );
             painter.rect_stroke(
                 pill,
                 CornerRadius::ZERO,
-                Stroke::new(1.0, BEOS_BORDER_BLACK),
+                Stroke::new(1.0, p.border),
                 egui::StrokeKind::Inside,
             );
             painter.text(

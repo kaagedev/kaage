@@ -7,14 +7,14 @@ use crate::panels::{
     render_ai_jobs, render_http_ports, render_system_monitor, render_tailscale_panel,
 };
 use crate::terminal::TerminalPane;
-use crate::theme::{
-    BEOS_PANEL_GRAY, BEOS_TAB_INACTIVE, BEOS_TAB_YELLOW, TOPBAR_HEIGHT, draw_beos_bevel,
-};
+use crate::theme::{TOPBAR_HEIGHT, draw_beos_bevel, palette};
 use crate::vitals::{VitalsSpawnRequest, VitalsWindow};
-use egui::{Color32, CornerRadius, Id, Pos2, Rect, Sense, Vec2};
+use egui::{Color32, CornerRadius, Id, Key, Pos2, Rect, Sense, Stroke, Vec2};
 use kaage_proto::{
     ClientMsg, ContainerInfo, DashboardSnapshot, NixosInfo, SystemdUnitInfo, SystemdUnitStatus,
 };
+
+pub const WORKSPACE_NAMES: [&str; 4] = ["1: Ops", "2: AI", "3: Files", "4: Logs"];
 
 pub enum PaneKind {
     Terminal(TerminalPane),
@@ -44,6 +44,8 @@ pub struct BeTab {
 
 pub struct BeWindowGroup {
     pub id: u64,
+    pub workspace: usize,
+    pub floating: bool,
     pub pos: Pos2,
     pub size: Vec2,
     pub tab_offset: f32,
@@ -54,6 +56,8 @@ pub struct BeWindowGroup {
 
 pub struct BeWindowManager {
     pub groups: Vec<BeWindowGroup>,
+    pub active_workspace: usize,
+    pub focused_group: Option<u64>,
     next_id: u64,
 }
 
@@ -61,6 +65,8 @@ impl BeWindowManager {
     pub fn new() -> Self {
         Self {
             groups: Vec::new(),
+            active_workspace: 0,
+            focused_group: None,
             next_id: 1,
         }
     }
@@ -72,9 +78,23 @@ impl BeWindowManager {
     }
 
     pub fn open_window(&mut self, title: String, kind: PaneKind, pos: Pos2, size: Vec2) -> u64 {
+        self.open_window_in_workspace(self.active_workspace, false, title, kind, pos, size)
+    }
+
+    pub fn open_window_in_workspace(
+        &mut self,
+        workspace: usize,
+        floating: bool,
+        title: String,
+        kind: PaneKind,
+        pos: Pos2,
+        size: Vec2,
+    ) -> u64 {
         let id = self.alloc_id();
         self.groups.push(BeWindowGroup {
             id,
+            workspace,
+            floating,
             pos,
             size,
             tab_offset: 0.0,
@@ -82,6 +102,9 @@ impl BeWindowManager {
             tabs: vec![BeTab { id, title, kind }],
             shaded: false,
         });
+        if workspace == self.active_workspace || floating {
+            self.focused_group = Some(id);
+        }
         id
     }
 
@@ -101,6 +124,10 @@ impl BeWindowManager {
             for t_idx in 0..self.groups[g_idx].tabs.len() {
                 if predicate(&self.groups[g_idx].tabs[t_idx].kind) {
                     let gid = self.groups[g_idx].id;
+                    let ws = self.groups[g_idx].workspace;
+                    if !self.groups[g_idx].floating {
+                        self.active_workspace = ws;
+                    }
                     self.focus_tab(gid, t_idx);
                     return true;
                 }
@@ -114,6 +141,10 @@ impl BeWindowManager {
             for t_idx in 0..self.groups[g_idx].tabs.len() {
                 if self.groups[g_idx].tabs[t_idx].title == title {
                     let gid = self.groups[g_idx].id;
+                    let ws = self.groups[g_idx].workspace;
+                    if !self.groups[g_idx].floating {
+                        self.active_workspace = ws;
+                    }
                     self.focus_tab(gid, t_idx);
                     return true;
                 }
@@ -129,8 +160,22 @@ impl BeWindowManager {
             if tab_idx < group.tabs.len() {
                 group.active_tab = tab_idx;
             }
-            // Move focused group to top of z-order
+            if !group.floating {
+                self.active_workspace = group.workspace;
+            }
+            self.focused_group = Some(group.id);
             self.groups.push(group);
+        }
+    }
+
+    pub fn toggle_pin_active(&mut self) {
+        if let Some(gid) = self.focused_group
+            && let Some(g) = self.groups.iter_mut().find(|g| g.id == gid)
+        {
+            g.floating = !g.floating;
+            if !g.floating {
+                g.workspace = self.active_workspace;
+            }
         }
     }
 
@@ -173,36 +218,12 @@ impl BeWindowManager {
         );
     }
 
-    pub fn tile_windows(&mut self, screen: Rect, sidebar_width: f32) {
-        let count = self.groups.len();
-        if count == 0 {
-            return;
-        }
-        let left = if sidebar_width > 0.0 {
-            sidebar_width + 22.0
-        } else {
-            14.0
-        };
-        let top = TOPBAR_HEIGHT + 12.0;
-        let right_margin = if screen.width() >= 760.0 { 104.0 } else { 14.0 };
-        let avail_w = (screen.width() - left - right_margin).max(320.0);
-        let avail_h = (screen.height() - top - 16.0).max(260.0);
-        let tab_h = 21.0;
-
-        let cols = if count == 1 { 1 } else { 2 };
-        let rows = count.div_ceil(cols);
-        let cell_w = ((avail_w - (cols as f32 - 1.0) * 12.0) / cols as f32).max(260.0);
-        let cell_h = ((avail_h - (rows as f32 - 1.0) * 12.0) / rows as f32 - tab_h).max(160.0);
-
-        for (i, group) in self.groups.iter_mut().enumerate() {
-            let col = i % cols;
-            let row = i / cols;
-            group.shaded = false;
-            group.pos = Pos2::new(
-                left + col as f32 * (cell_w + 12.0),
-                top + row as f32 * (cell_h + tab_h + 12.0),
-            );
-            group.size = Vec2::new(cell_w, cell_h);
+    pub fn tile_windows(&mut self, _screen: Rect, _sidebar_width: f32) {
+        for group in &mut self.groups {
+            if group.workspace == self.active_workspace {
+                group.floating = false;
+                group.shaded = false;
+            }
         }
     }
 
@@ -210,6 +231,7 @@ impl BeWindowManager {
     pub fn show(
         &mut self,
         ctx: &egui::Context,
+        sidebar_width: f32,
         nixos: Option<&NixosInfo>,
         units: &[SystemdUnitInfo],
         selected_unit_status: &mut Option<SystemdUnitStatus>,
@@ -219,6 +241,93 @@ impl BeWindowManager {
         mem_history: &[f32],
         send_msg: &mut dyn FnMut(ClientMsg),
     ) -> Vec<InspectorSpawnRequest> {
+        let p = palette();
+        let screen = ctx.content_rect();
+        let is_mobile = screen.width() < 768.0;
+
+        // Keyboard workspace switching (Alt+1..4) and pane navigation (Alt+H/J/K/L)
+        ctx.input(|i| {
+            if i.modifiers.alt {
+                if i.key_pressed(Key::Num1) {
+                    self.active_workspace = 0;
+                } else if i.key_pressed(Key::Num2) {
+                    self.active_workspace = 1;
+                } else if i.key_pressed(Key::Num3) {
+                    self.active_workspace = 2;
+                } else if i.key_pressed(Key::Num4) {
+                    self.active_workspace = 3;
+                } else if i.key_pressed(Key::L) || i.key_pressed(Key::J) || i.key_pressed(Key::ArrowRight) {
+                    self.cycle_focus(1);
+                } else if i.key_pressed(Key::H) || i.key_pressed(Key::K) || i.key_pressed(Key::ArrowLeft) {
+                    self.cycle_focus(-1);
+                }
+            }
+        });
+
+        // Compute stage rect for BSP tiling (respecting topbar, optional sidebar, right desktop icons)
+        let left_margin = if is_mobile {
+            4.0
+        } else if sidebar_width > 0.0 {
+            sidebar_width + 18.0
+        } else {
+            8.0
+        };
+        let right_margin = if is_mobile {
+            4.0
+        } else if screen.width() >= 1120.0 {
+            98.0
+        } else {
+            8.0
+        };
+        let bottom_margin = if is_mobile { 38.0 } else { 8.0 };
+        let stage_rect = Rect::from_min_max(
+            Pos2::new(screen.min.x + left_margin, screen.min.y + TOPBAR_HEIGHT + 8.0),
+            Pos2::new(
+                (screen.max.x - right_margin).max(screen.min.x + left_margin + 240.0),
+                (screen.max.y - bottom_margin).max(screen.min.y + TOPBAR_HEIGHT + 180.0),
+            ),
+        );
+
+        let tab_height = 22.0;
+
+        // Assign deterministic BSP rects to all tiled groups in the active workspace
+        let tiled_indices: Vec<usize> = self
+            .groups
+            .iter()
+            .enumerate()
+            .filter(|(_, g)| !g.floating && g.workspace == self.active_workspace)
+            .map(|(idx, _)| idx)
+            .collect();
+
+        if is_mobile {
+            // Adaptive mobile deck: active pane fills entire stage
+            let active_gid = self.focused_group.filter(|gid| {
+                self.groups
+                    .iter()
+                    .any(|g| g.id == *gid && (g.floating || g.workspace == self.active_workspace))
+            });
+            let first_visible = tiled_indices.first().map(|&idx| self.groups[idx].id);
+            let chosen = active_gid.or(first_visible);
+            if let Some(cid) = chosen {
+                self.focused_group = Some(cid);
+                if let Some(g) = self.groups.iter_mut().find(|g| g.id == cid) {
+                    g.pos = stage_rect.min;
+                    g.size = Vec2::new(stage_rect.width(), (stage_rect.height() - tab_height).max(160.0));
+                    g.shaded = false;
+                }
+            }
+        } else if !tiled_indices.is_empty() {
+            let rects = compute_bsp_rects(stage_rect, tiled_indices.len());
+            for (slot, &g_idx) in tiled_indices.iter().enumerate() {
+                if let Some(r) = rects.get(slot) {
+                    self.groups[g_idx].pos = r.min;
+                    self.groups[g_idx].size =
+                        Vec2::new(r.width().max(240.0), (r.height() - tab_height).max(120.0));
+                    self.groups[g_idx].tab_offset = 0.0;
+                }
+            }
+        }
+
         let mut spawn_requests = Vec::new();
         let mut merge_req: Option<(u64, usize, u64)> = None;
         let mut detach_req: Option<(u64, usize, Pos2)> = None;
@@ -228,39 +337,62 @@ impl BeWindowManager {
         let header_zones: Vec<(u64, Rect)> = self
             .groups
             .iter()
-            .map(|g| (g.id, Rect::from_min_size(g.pos, Vec2::new(g.size.x, 22.0))))
+            .filter(|g| g.floating || g.workspace == self.active_workspace)
+            .map(|g| (g.id, Rect::from_min_size(g.pos, Vec2::new(g.size.x, tab_height + 2.0))))
             .collect();
 
+        let focused_id = self.focused_group;
+
         for group in &mut self.groups {
-            let tab_height = 21.0;
+            if !group.floating && group.workspace != self.active_workspace {
+                continue;
+            }
+            if is_mobile && Some(group.id) != focused_id {
+                continue;
+            }
+
+            let is_focused = Some(group.id) == focused_id;
             let body_pos = Pos2::new(group.pos.x, group.pos.y + tab_height);
+            let area_order = if group.floating {
+                egui::Order::Foreground
+            } else {
+                egui::Order::Middle
+            };
 
             egui::Area::new(Id::unique(("be_group", group.id)))
-                .current_pos(group.pos)
-                .order(egui::Order::Middle)
+                .fixed_pos(group.pos)
+                .order(area_order)
                 .show(ctx, |ui| {
                     let mut cursor_x = group.pos.x + group.tab_offset;
 
                     for (idx, tab) in group.tabs.iter().enumerate() {
                         let is_active = idx == group.active_tab;
-                        let tab_width = (tab.title.len() as f32 * 7.8 + 44.0).max(96.0);
+                        let pin_extra = if is_active { 26.0 } else { 0.0 };
+                        let tab_width = (tab.title.len() as f32 * 7.4 + 42.0 + pin_extra).max(96.0);
                         let tab_rect = Rect::from_min_size(
                             Pos2::new(cursor_x, group.pos.y),
                             Vec2::new(tab_width, tab_height + 1.0),
                         );
 
                         let fill = if is_active {
-                            BEOS_TAB_YELLOW
+                            p.tab_active_bg
                         } else {
-                            BEOS_TAB_INACTIVE
+                            p.tab_inactive_bg
                         };
                         {
                             let painter = ui.painter();
                             painter.rect_filled(tab_rect, CornerRadius::ZERO, fill);
                             draw_beos_bevel(painter, tab_rect, false);
+                            if is_active && p.is_dark {
+                                painter.rect_filled(
+                                    Rect::from_min_size(tab_rect.min, Vec2::new(tab_rect.width(), 2.0)),
+                                    CornerRadius::ZERO,
+                                    p.accent,
+                                );
+                            }
                         }
 
-                        // BeOS Left Close Box (non-overlapping hit rect so tab drag never swallows clicks)
+                        // Left Close Box (non-overlapping hit rect)
                         let close_rect = Rect::from_min_size(
                             Pos2::new(tab_rect.min.x + 5.0, tab_rect.min.y + 5.0),
                             Vec2::splat(12.0),
@@ -278,14 +410,14 @@ impl BeWindowManager {
                             ui.painter().rect_filled(
                                 close_rect,
                                 CornerRadius::ZERO,
-                                Color32::from_rgb(255, 224, 102),
+                                p.status_red,
                             );
                         }
                         draw_beos_bevel(ui.painter(), close_rect, close_pressed);
                         if close_resp.hovered() {
                             let c = close_rect.center();
                             let d = 2.5;
-                            let stroke = egui::Stroke::new(1.2, Color32::BLACK);
+                            let stroke = Stroke::new(1.2, Color32::WHITE);
                             ui.painter().line_segment(
                                 [Pos2::new(c.x - d, c.y - d), Pos2::new(c.x + d, c.y + d)],
                                 stroke,
@@ -299,18 +431,57 @@ impl BeWindowManager {
                             close_req = Some((group.id, idx));
                         }
 
+                        // Right Pin-to-Float (PiP) Toggle on active tab
+                        let mut drag_right_x = tab_rect.max.x;
+                        if is_active && !is_mobile {
+                            let pin_rect = Rect::from_min_size(
+                                Pos2::new(tab_rect.max.x - 24.0, tab_rect.min.y + 4.0),
+                                Vec2::new(20.0, 14.0),
+                            );
+                            let pin_resp = ui
+                                .interact(
+                                    pin_rect,
+                                    Id::unique(("be_pin", group.id, tab.id)),
+                                    Sense::click(),
+                                )
+                                .on_hover_text(if group.floating {
+                                    "Snap back into BSP tiling"
+                                } else {
+                                    "Pin as floating PiP overlay (stays across workspaces)"
+                                });
+                            ui.painter().rect_filled(
+                                pin_rect,
+                                CornerRadius::ZERO,
+                                if group.floating { p.accent } else { p.widget },
+                            );
+                            ui.painter().text(
+                                pin_rect.center(),
+                                egui::Align2::CENTER_CENTER,
+                                if group.floating { "PIP" } else { "FLT" },
+                                egui::FontId::monospace(8.5),
+                                if group.floating { Color32::BLACK } else { p.text_muted },
+                            );
+                            if pin_resp.clicked() {
+                                group.floating = !group.floating;
+                                if !group.floating {
+                                    group.workspace = self.active_workspace;
+                                }
+                            }
+                            drag_right_x = pin_rect.min.x - 2.0;
+                        }
+
                         // Tab Title
                         ui.painter().text(
                             Pos2::new(close_rect.max.x + 6.0, tab_rect.center().y),
                             egui::Align2::LEFT_CENTER,
                             &tab.title,
-                            egui::FontId::proportional(13.0),
-                            Color32::BLACK,
+                            egui::FontId::proportional(12.5),
+                            if is_active { p.tab_active_fg } else { p.text_muted },
                         );
 
                         let tab_drag_rect = Rect::from_min_max(
                             Pos2::new(close_hit_rect.max.x + 1.0, tab_rect.min.y),
-                            tab_rect.max,
+                            Pos2::new(drag_right_x.max(close_hit_rect.max.x + 4.0), tab_rect.max.y),
                         );
                         let tab_resp = ui.interact(
                             tab_drag_rect,
@@ -322,23 +493,17 @@ impl BeWindowManager {
                             group.active_tab = idx;
                             bring_to_front = Some(group.id);
                         }
-                        if tab_resp.double_clicked() {
+                        if tab_resp.double_clicked() && group.floating {
                             group.shaded = !group.shaded;
                         }
                         if tab_resp.dragged() {
                             bring_to_front = Some(group.id);
                             let delta = tab_resp.drag_delta();
-                            let shift_held = ui.input(|i| i.modifiers.shift);
-
-                            if shift_held {
-                                let max_offset = (group.size.x - tab_width).max(0.0);
-                                group.tab_offset =
-                                    (group.tab_offset + delta.x).clamp(0.0, max_offset);
-                            } else if group.tabs.len() > 1 && delta.length() > 14.0 {
+                            if group.tabs.len() > 1 && delta.length() > 14.0 {
                                 if let Some(ptr) = ui.input(|i| i.pointer.interact_pos()) {
                                     detach_req = Some((group.id, idx, ptr));
                                 }
-                            } else {
+                            } else if group.floating {
                                 group.pos += delta;
                                 group.pos.y = group.pos.y.max(TOPBAR_HEIGHT + 2.0);
                             }
@@ -362,11 +527,19 @@ impl BeWindowManager {
                         let body_rect = Rect::from_min_size(body_pos, group.size);
                         {
                             let painter = ui.painter();
-                            painter.rect_filled(body_rect, CornerRadius::ZERO, BEOS_PANEL_GRAY);
+                            painter.rect_filled(body_rect, CornerRadius::ZERO, p.surface);
                             draw_beos_bevel(painter, body_rect, false);
+                            if is_focused && p.is_dark {
+                                painter.rect_stroke(
+                                    body_rect,
+                                    CornerRadius::ZERO,
+                                    Stroke::new(1.0, p.accent),
+                                    egui::StrokeKind::Inside,
+                                );
+                            }
                         }
 
-                        let inner_rect = body_rect.shrink(4.0);
+                        let inner_rect = body_rect.shrink(5.0);
                         let mut child_ui = ui.new_child(
                             egui::UiBuilder::new()
                                 .max_rect(inner_rect)
@@ -490,23 +663,74 @@ impl BeWindowManager {
                             }
                         }
 
-                        // Bottom-right resize grip
-                        let grip_rect = Rect::from_min_size(
-                            Pos2::new(body_rect.max.x - 14.0, body_rect.max.y - 14.0),
-                            Vec2::splat(14.0),
-                        );
-                        draw_beos_bevel(ui.painter(), grip_rect, false);
-                        let resize_resp = ui.interact(
-                            grip_rect,
-                            Id::unique(("be_resize", group.id)),
-                            Sense::drag(),
-                        );
-                        if resize_resp.dragged() {
-                            group.size = (group.size + resize_resp.drag_delta())
-                                .max(Vec2::new(260.0, 140.0));
+                        // Resize grip for floating PiP windows
+                        if group.floating {
+                            let grip_rect = Rect::from_min_size(
+                                Pos2::new(body_rect.max.x - 14.0, body_rect.max.y - 14.0),
+                                Vec2::splat(14.0),
+                            );
+                            draw_beos_bevel(ui.painter(), grip_rect, false);
+                            let resize_resp = ui.interact(
+                                grip_rect,
+                                Id::unique(("be_resize", group.id)),
+                                Sense::drag(),
+                            );
+                            if resize_resp.dragged() {
+                                group.size = (group.size + resize_resp.drag_delta())
+                                    .max(Vec2::new(280.0, 160.0));
+                            }
                         }
                     }
                 });
+        }
+
+        // Mobile bottom tab pill deck (< 768px)
+        if is_mobile {
+            let deck_rect = Rect::from_min_size(
+                Pos2::new(screen.min.x, screen.max.y - 34.0),
+                Vec2::new(screen.width(), 34.0),
+            );
+            let mut mobile_select = None;
+            egui::Area::new(Id::unique("kaage_mobile_deck"))
+                .fixed_pos(deck_rect.min)
+                .order(egui::Order::Foreground)
+                .show(ctx, |ui| {
+                    ui.painter().rect_filled(deck_rect, CornerRadius::ZERO, p.surface);
+                    draw_beos_bevel(ui.painter(), deck_rect, false);
+                    let mut x = deck_rect.min.x + 6.0;
+                    for g in &self.groups {
+                        if !g.floating && g.workspace != self.active_workspace {
+                            continue;
+                        }
+                        if let Some(tab) = g.tabs.get(g.active_tab) {
+                            let w = (tab.title.len() as f32 * 6.5 + 16.0).clamp(64.0, 128.0);
+                            let r = Rect::from_min_size(Pos2::new(x, deck_rect.min.y + 5.0), Vec2::new(w, 24.0));
+                            let active = Some(g.id) == focused_id;
+                            ui.painter().rect_filled(
+                                r,
+                                CornerRadius::ZERO,
+                                if active { p.tab_active_bg } else { p.widget },
+                            );
+                            if active {
+                                ui.painter().rect_stroke(r, CornerRadius::ZERO, Stroke::new(1.0, p.accent), egui::StrokeKind::Inside);
+                            }
+                            ui.painter().text(
+                                r.center(),
+                                egui::Align2::CENTER_CENTER,
+                                &tab.title,
+                                egui::FontId::proportional(11.0),
+                                if active { p.tab_active_fg } else { p.text },
+                            );
+                            if ui.interact(r, Id::unique(("mobile_pill", g.id)), Sense::click()).clicked() {
+                                mobile_select = Some(g.id);
+                            }
+                            x = r.max.x + 4.0;
+                        }
+                    }
+                });
+            if let Some(gid) = mobile_select {
+                self.focused_group = Some(gid);
+            }
         }
 
         if let Some((gid, idx)) = close_req {
@@ -518,14 +742,33 @@ impl BeWindowManager {
         if let Some((src, idx, pos)) = detach_req {
             self.detach_tab(src, idx, pos);
         }
-        if let Some(gid) = bring_to_front
-            && let Some(pos) = self.groups.iter().position(|g| g.id == gid)
-        {
-            let g = self.groups.remove(pos);
-            self.groups.push(g);
+        if let Some(gid) = bring_to_front {
+            self.focused_group = Some(gid);
+            if let Some(pos) = self.groups.iter().position(|g| g.id == gid) {
+                let g = self.groups.remove(pos);
+                self.groups.push(g);
+            }
         }
 
         spawn_requests
+    }
+
+    fn cycle_focus(&mut self, dir: isize) {
+        let visible: Vec<u64> = self
+            .groups
+            .iter()
+            .filter(|g| g.floating || g.workspace == self.active_workspace)
+            .map(|g| g.id)
+            .collect();
+        if visible.is_empty() {
+            return;
+        }
+        let cur = self
+            .focused_group
+            .and_then(|id| visible.iter().position(|&v| v == id))
+            .unwrap_or(0);
+        let next = (cur as isize + dir).rem_euclid(visible.len() as isize) as usize;
+        self.focused_group = Some(visible[next]);
     }
 
     fn close_tab(&mut self, group_id: u64, tab_idx: usize, send_msg: &mut dyn FnMut(ClientMsg)) {
@@ -568,6 +811,7 @@ impl BeWindowManager {
         if let Some(dst) = self.groups.iter_mut().find(|g| g.id == dst_id) {
             dst.tabs.push(tab);
             dst.active_tab = dst.tabs.len() - 1;
+            self.focused_group = Some(dst.id);
         }
     }
 
@@ -578,11 +822,14 @@ impl BeWindowManager {
         if src.tabs.len() <= 1 || tab_idx >= src.tabs.len() {
             return;
         }
+        let ws = src.workspace;
         let tab = src.tabs.remove(tab_idx);
         src.active_tab = src.active_tab.min(src.tabs.len() - 1);
         let new_group_id = self.alloc_id();
         self.groups.push(BeWindowGroup {
             id: new_group_id,
+            workspace: ws,
+            floating: false,
             pos,
             size: Vec2::new(620.0, 380.0),
             tab_offset: 0.0,
@@ -590,5 +837,37 @@ impl BeWindowManager {
             tabs: vec![tab],
             shaded: false,
         });
+        self.focused_group = Some(new_group_id);
     }
+}
+
+/// Deterministic recursive Binary-Space Partitioning (BSP) layout for `count` panes.
+fn compute_bsp_rects(area: Rect, count: usize) -> Vec<Rect> {
+    if count == 0 {
+        return Vec::new();
+    }
+    if count == 1 {
+        return vec![area];
+    }
+    let gap = 6.0;
+    let mut out = Vec::with_capacity(count);
+    let mut rem = area;
+    for i in 0..count {
+        if i + 1 == count {
+            out.push(rem);
+            break;
+        }
+        let split_horizontal = rem.width() >= rem.height();
+        if split_horizontal {
+            let ratio = if i == 0 && count == 2 { 0.54 } else { 0.5 };
+            let split_x = rem.min.x + (rem.width() - gap) * ratio;
+            out.push(Rect::from_min_max(rem.min, Pos2::new(split_x, rem.max.y)));
+            rem = Rect::from_min_max(Pos2::new(split_x + gap, rem.min.y), rem.max);
+        } else {
+            let split_y = rem.min.y + (rem.height() - gap) * 0.5;
+            out.push(Rect::from_min_max(rem.min, Pos2::new(rem.max.x, split_y)));
+            rem = Rect::from_min_max(Pos2::new(rem.min.x, split_y + gap), rem.max);
+        }
+    }
+    out
 }

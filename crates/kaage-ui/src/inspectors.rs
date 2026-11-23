@@ -70,7 +70,7 @@ pub fn render_systemd_inspector(
     }
 
     ui.horizontal(|ui| {
-        ui.label(RichText::new("Filter:").color(Color32::BLACK));
+        ui.label(RichText::new("Filter:").color(crate::theme::text_color()));
         ui.add(egui::TextEdit::singleline(filter).desired_width(140.0));
         if be_toggle_button(ui, "All", *scope_filter == ScopeFilter::All).clicked() {
             *scope_filter = ScopeFilter::All;
@@ -93,7 +93,7 @@ pub fn render_systemd_inspector(
     });
 
     ui.horizontal(|ui| {
-        ui.label(RichText::new("State:").color(Color32::BLACK));
+        ui.label(RichText::new("State:").color(crate::theme::text_color()));
         if be_toggle_button(ui, "All", *state_filter == StateFilter::All).clicked() {
             *state_filter = StateFilter::All;
         }
@@ -172,7 +172,7 @@ pub fn render_systemd_inspector(
                         RichText::new(format!("[{scope_tag}]"))
                             .monospace()
                             .size(10.5)
-                            .color(Color32::from_rgb(70, 70, 70)),
+                            .color(crate::theme::muted_text_color()),
                     );
 
                     if unit.nixos_managed {
@@ -184,11 +184,11 @@ pub fn render_systemd_inspector(
                         );
                     }
 
-                    ui.label(RichText::new(&unit.name).strong().color(Color32::BLACK));
+                    ui.label(RichText::new(&unit.name).strong().color(crate::theme::text_color()));
                     ui.label(
                         RichText::new(format!("({})", unit.sub_state))
                             .size(11.0)
-                            .color(Color32::from_rgb(70, 70, 70)),
+                            .color(crate::theme::muted_text_color()),
                     );
 
                     if !unit.unit_file_state.is_empty() {
@@ -271,7 +271,8 @@ pub fn render_systemd_inspector(
     if let Some(st) = selected_status.as_ref() {
         ui.separator();
         egui::Frame::NONE
-            .fill(Color32::from_rgb(232, 232, 232))
+            .fill(crate::theme::card_fill())
+            .stroke(egui::Stroke::new(1.0, crate::theme::palette().border))
             .inner_margin(6.0)
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
@@ -282,7 +283,7 @@ pub fn render_systemd_inspector(
                     ui.label(
                         RichText::new(format!("Status: {} [{scope_tag}]", st.name))
                             .strong()
-                            .color(Color32::BLACK),
+                            .color(crate::theme::text_color()),
                     );
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if be_button(ui, "Close").clicked() {
@@ -343,7 +344,7 @@ pub fn render_systemd_inspector(
                         st.load_state,
                     ))
                     .size(11.0)
-                    .color(Color32::BLACK),
+                    .color(crate::theme::text_color()),
                 );
 
                 if let Some(ref store) = st.nix_store_path {
@@ -370,7 +371,7 @@ pub fn render_systemd_inspector(
                             RichText::new(&st.status_text)
                                 .monospace()
                                 .size(10.5)
-                                .color(Color32::from_rgb(25, 25, 25)),
+                                .color(crate::theme::text_color()),
                         );
                     });
             });
@@ -391,7 +392,7 @@ pub fn render_docker_inspector(
     let mut spawn_req = None;
 
     ui.horizontal(|ui| {
-        ui.label(RichText::new("Filter:").color(Color32::BLACK));
+        ui.label(RichText::new("Filter:").color(crate::theme::text_color()));
         ui.text_edit_singleline(filter);
         if be_button(ui, "Refresh").clicked() {
             send_msg(ClientMsg::ListContainers);
@@ -419,7 +420,7 @@ pub fn render_docker_inspector(
                     BEOS_STATUS_RED
                 };
                 ui.label(RichText::new("■").color(state_color));
-                ui.label(RichText::new(&ctr.name).strong().color(Color32::BLACK));
+                ui.label(RichText::new(&ctr.name).strong().color(crate::theme::text_color()));
                 ui.label(RichText::new(&ctr.image).color(Color32::from_rgb(75, 75, 75)));
 
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {

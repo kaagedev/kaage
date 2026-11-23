@@ -1,45 +1,34 @@
 use crate::clock::{ClockMode, format_now};
 use crate::inspectors::{ScopeFilter, StateFilter};
 use crate::theme::{
-    BEOS_BEVEL_DARK, BEOS_BEVEL_LIGHT, BEOS_BORDER_BLACK, BEOS_LED_GOLD, BEOS_LED_GREEN,
-    BEOS_LED_RED, BEOS_PANEL_GRAY, BEOS_PANEL_LO, BEOS_STATUS_GREEN, BEOS_TAB_YELLOW,
-    BEOS_WIDGET_FACE, TOPBAR_HEIGHT, draw_beos_bevel,
+    BEOS_BORDER_BLACK, BEOS_LED_GOLD, BEOS_LED_GREEN, BEOS_LED_RED, BEOS_STATUS_GREEN,
+    BEOS_TAB_YELLOW, TOPBAR_HEIGHT, current_theme_mode, draw_beos_bevel, palette,
 };
-use crate::wm::{BeWindowGroup, PaneKind};
+use crate::wm::WORKSPACE_NAMES;
 use egui::{Color32, CornerRadius, Id, Pos2, Rect, Sense, Stroke, Vec2};
-use kaage_proto::{HostMetrics, NixosInfo, SystemdUnitInfo, VitalsTick};
+use kaage_proto::{DashboardSnapshot, HostMetrics, NixosInfo, SystemdUnitInfo, VitalsTick};
 
 pub struct BeDeskbar {
-    pub menu_open: bool,
     pub clock_mode: ClockMode,
 }
 
 pub enum DeskbarAction {
+    OpenPalette,
     ToggleTracker,
-    TileWindows,
-    NewTerminal,
+    ToggleTheme,
+    SwitchWorkspace(usize),
     OpenSystemdInspector {
         scope: ScopeFilter,
         state: StateFilter,
     },
-    OpenDockerInspector,
-    OpenSystemMonitor,
     OpenVitals,
-    OpenBottom,
-    OpenAiJobs,
     OpenHttpPorts,
     OpenTailscale,
-    OpenFileTracker,
-    FocusWindow {
-        group_id: u64,
-        tab_idx: usize,
-    },
 }
 
 impl BeDeskbar {
     pub fn new() -> Self {
         Self {
-            menu_open: false,
             clock_mode: ClockMode::DateTime,
         }
     }
@@ -51,11 +40,13 @@ impl BeDeskbar {
         nixos: Option<&NixosInfo>,
         metrics: Option<&HostMetrics>,
         latest_vital: Option<&VitalsTick>,
+        dashboard: Option<&DashboardSnapshot>,
         units: &[SystemdUnitInfo],
         connected: bool,
         tracker_visible: bool,
-        groups: &[BeWindowGroup],
+        active_workspace: usize,
     ) -> Option<DeskbarAction> {
+        let p = palette();
         let mut action = None;
         let screen = ctx.content_rect();
         let bar_rect = Rect::from_min_size(screen.min, Vec2::new(screen.width(), TOPBAR_HEIGHT));
@@ -65,105 +56,127 @@ impl BeDeskbar {
             .order(egui::Order::Foreground)
             .show(ctx, |ui| {
                 let painter = ui.painter();
-                painter.rect_filled(bar_rect, CornerRadius::ZERO, BEOS_PANEL_GRAY);
-                painter.line_segment(
-                    [bar_rect.left_top(), bar_rect.right_top()],
-                    Stroke::new(1.0, BEOS_BEVEL_LIGHT),
-                );
-                painter.line_segment(
-                    [
-                        Pos2::new(bar_rect.min.x, bar_rect.max.y - 2.0),
-                        Pos2::new(bar_rect.max.x, bar_rect.max.y - 2.0),
-                    ],
-                    Stroke::new(1.0, BEOS_BEVEL_DARK),
-                );
+                painter.rect_filled(bar_rect, CornerRadius::ZERO, p.surface);
                 painter.line_segment(
                     [bar_rect.left_bottom(), bar_rect.right_bottom()],
-                    Stroke::new(1.0, BEOS_BORDER_BLACK),
+                    Stroke::new(1.0, p.border),
                 );
 
-                // --- LEFT SIDE: Crow Menu + Tracker Toggle + Running Window Buttons ---
                 let mut left_x = bar_rect.min.x + 6.0;
                 let btn_y = bar_rect.min.y + 3.0;
                 let btn_h = TOPBAR_HEIGHT - 6.0;
 
-                // 1) Crow "kaage" Menu Button
-                let menu_btn_rect = Rect::from_min_size(Pos2::new(left_x, btn_y), Vec2::new(76.0, btn_h));
-                let menu_resp =
-                    ui.interact(menu_btn_rect, Id::unique("topbar_crow_btn"), Sense::click());
-                if menu_resp.clicked() {
-                    self.menu_open = !self.menu_open;
-                }
-                let menu_fill = if self.menu_open {
-                    BEOS_PANEL_LO
-                } else if menu_resp.hovered() {
-                    Color32::from_rgb(240, 240, 240)
-                } else {
-                    BEOS_WIDGET_FACE
-                };
-                painter.rect_filled(menu_btn_rect, CornerRadius::ZERO, menu_fill);
-                draw_beos_bevel(painter, menu_btn_rect, self.menu_open);
+                // 1) Crow "kaage ⌘K" Command HUD Trigger
+                let cmd_rect = Rect::from_min_size(Pos2::new(left_x, btn_y), Vec2::new(96.0, btn_h));
+                let cmd_resp = ui
+                    .interact(cmd_rect, Id::unique("topbar_cmd_btn"), Sense::click())
+                    .on_hover_text("Open Command Palette (Ctrl+K / Cmd+K)");
+                painter.rect_filled(
+                    cmd_rect,
+                    CornerRadius::ZERO,
+                    if cmd_resp.hovered() { p.widget_hover } else { p.widget },
+                );
+                draw_beos_bevel(painter, cmd_rect, false);
                 draw_crow_emblem(
                     painter,
-                    Pos2::new(menu_btn_rect.min.x + 14.0, menu_btn_rect.center().y),
+                    Pos2::new(cmd_rect.min.x + 13.0, cmd_rect.center().y),
                 );
                 painter.text(
-                    Pos2::new(menu_btn_rect.min.x + 28.0, menu_btn_rect.center().y),
+                    Pos2::new(cmd_rect.min.x + 26.0, cmd_rect.center().y),
                     egui::Align2::LEFT_CENTER,
                     "kaage",
-                    egui::FontId::proportional(12.5),
-                    Color32::BLACK,
-                );
-                left_x = menu_btn_rect.max.x + 6.0;
-
-                // 2) Tracker Toggle Button (acedop-style with BeOS folder icon)
-                let tracker_rect = Rect::from_min_size(Pos2::new(left_x, btn_y), Vec2::new(76.0, btn_h));
-                let tracker_resp = ui
-                    .interact(tracker_rect, Id::unique("topbar_tracker_btn"), Sense::click())
-                    .on_hover_text("Show / Hide Tracker sidebar");
-                let tracker_fill = if tracker_visible {
-                    BEOS_PANEL_LO
-                } else if tracker_resp.hovered() {
-                    Color32::from_rgb(240, 240, 240)
-                } else {
-                    BEOS_WIDGET_FACE
-                };
-                painter.rect_filled(tracker_rect, CornerRadius::ZERO, tracker_fill);
-                draw_beos_bevel(painter, tracker_rect, tracker_visible);
-                draw_mini_folder(
-                    painter,
-                    Pos2::new(tracker_rect.min.x + 7.0, tracker_rect.center().y - 5.0),
+                    egui::FontId::proportional(12.0),
+                    p.text,
                 );
                 painter.text(
-                    Pos2::new(tracker_rect.min.x + 23.0, tracker_rect.center().y),
-                    egui::Align2::LEFT_CENTER,
-                    "Tracker",
-                    egui::FontId::proportional(12.0),
-                    Color32::BLACK,
+                    Pos2::new(cmd_rect.max.x - 6.0, cmd_rect.center().y),
+                    egui::Align2::RIGHT_CENTER,
+                    "⌘K",
+                    egui::FontId::monospace(10.0),
+                    p.accent,
                 );
-                if tracker_resp.clicked() {
-                    self.menu_open = false;
+                if cmd_resp.clicked() {
+                    action = Some(DeskbarAction::OpenPalette);
+                }
+                left_x = cmd_rect.max.x + 6.0;
+
+                // 2) Sidebar Nav Toggle
+                let nav_rect = Rect::from_min_size(Pos2::new(left_x, btn_y), Vec2::new(48.0, btn_h));
+                let nav_resp = ui
+                    .interact(nav_rect, Id::unique("topbar_tracker_btn"), Sense::click())
+                    .on_hover_text("Toggle Host Sidebar");
+                painter.rect_filled(
+                    nav_rect,
+                    CornerRadius::ZERO,
+                    if tracker_visible { p.widget_pressed } else { p.widget },
+                );
+                draw_beos_bevel(painter, nav_rect, tracker_visible);
+                painter.text(
+                    nav_rect.center(),
+                    egui::Align2::CENTER_CENTER,
+                    "Nav",
+                    egui::FontId::proportional(11.5),
+                    if tracker_visible { p.accent } else { p.text },
+                );
+                if nav_resp.clicked() {
                     action = Some(DeskbarAction::ToggleTracker);
                 }
-                left_x = tracker_rect.max.x + 6.0;
+                left_x = nav_rect.max.x + 8.0;
 
-                // --- RIGHT SIDE (right-to-left): Clock, CPU/RAM, Services LED, NixOS LED, WS LED ---
+                // 3) Workspace Switcher Pills: [1: Ops] [2: AI] [3: Files] [4: Logs]
+                for (ws_idx, ws_name) in WORKSPACE_NAMES.iter().enumerate() {
+                    let w = (ws_name.len() as f32 * 6.5 + 14.0).max(52.0);
+                    let r = Rect::from_min_size(Pos2::new(left_x, btn_y), Vec2::new(w, btn_h));
+                    let active = ws_idx == active_workspace;
+                    let resp = ui
+                        .interact(r, Id::unique(("topbar_ws", ws_idx)), Sense::click())
+                        .on_hover_text(format!("Switch to {ws_name} (Alt+{})", ws_idx + 1));
+                    let fill = if active {
+                        if p.is_dark {
+                            Color32::from_rgb(46, 38, 22)
+                        } else {
+                            BEOS_TAB_YELLOW
+                        }
+                    } else if resp.hovered() {
+                        p.widget_hover
+                    } else {
+                        p.widget
+                    };
+                    painter.rect_filled(r, CornerRadius::ZERO, fill);
+                    draw_beos_bevel(painter, r, active);
+                    if active && p.is_dark {
+                        painter.rect_stroke(r, CornerRadius::ZERO, Stroke::new(1.0, p.accent), egui::StrokeKind::Inside);
+                    }
+                    painter.text(
+                        r.center(),
+                        egui::Align2::CENTER_CENTER,
+                        *ws_name,
+                        egui::FontId::monospace(10.5),
+                        if active && p.is_dark { p.accent } else { p.text },
+                    );
+                    if resp.clicked() {
+                        action = Some(DeskbarAction::SwitchWorkspace(ws_idx));
+                    }
+                    left_x = r.max.x + 4.0;
+                }
+
+                // --- RIGHT SIDE (right-to-left) ---
                 let mut right_x = bar_rect.max.x - 6.0;
 
                 // 1) Clickable Live DateTime Clock
                 let clock_text = format_now(self.clock_mode);
-                let clock_w = (clock_text.len() as f32 * 6.8 + 16.0).max(58.0);
+                let clock_w = (clock_text.len() as f32 * 6.6 + 14.0).max(56.0);
                 let clock_rect = Rect::from_min_size(
                     Pos2::new(right_x - clock_w, btn_y),
                     Vec2::new(clock_w, btn_h),
                 );
-                draw_recessed_box(painter, clock_rect, Color32::from_rgb(207, 207, 207));
+                draw_tray_well(painter, clock_rect);
                 painter.text(
                     clock_rect.center(),
                     egui::Align2::CENTER_CENTER,
                     &clock_text,
-                    egui::FontId::monospace(11.0),
-                    Color32::BLACK,
+                    egui::FontId::monospace(10.5),
+                    p.text,
                 );
                 if ui
                     .interact(clock_rect, Id::unique("topbar_clock"), Sense::click())
@@ -172,25 +185,50 @@ impl BeDeskbar {
                 {
                     self.clock_mode = self.clock_mode.next();
                 }
-                right_x = clock_rect.min.x - 6.0;
+                right_x = clock_rect.min.x - 5.0;
 
-                // 2) Live CPU / RAM Mini-Meters Tray
+                // 2) Theme Switcher Toggle (Obsidian / Retro BeOS)
+                let theme_label = format!("◐ {}", current_theme_mode().label());
+                let theme_w = (theme_label.len() as f32 * 6.2 + 12.0).max(66.0);
+                if right_x - theme_w > left_x + 20.0 {
+                    let theme_rect = Rect::from_min_size(
+                        Pos2::new(right_x - theme_w, btn_y),
+                        Vec2::new(theme_w, btn_h),
+                    );
+                    let resp = ui
+                        .interact(theme_rect, Id::unique("topbar_theme"), Sense::click())
+                        .on_hover_text("Switch between Obsidian Amber (Dark) and Retro BeOS (Light)");
+                    painter.rect_filled(
+                        theme_rect,
+                        CornerRadius::ZERO,
+                        if resp.hovered() { p.widget_hover } else { p.widget },
+                    );
+                    draw_beos_bevel(painter, theme_rect, false);
+                    painter.text(
+                        theme_rect.center(),
+                        egui::Align2::CENTER_CENTER,
+                        &theme_label,
+                        egui::FontId::proportional(10.5),
+                        p.text,
+                    );
+                    if resp.clicked() {
+                        action = Some(DeskbarAction::ToggleTheme);
+                    }
+                    right_x = theme_rect.min.x - 5.0;
+                }
+
+                // 3) Live 3-bar CPU / RAM / GPU Sparkbars + WS LED
                 let meters_w = 114.0;
-                if right_x - meters_w > left_x + 40.0 {
+                if right_x - meters_w > left_x + 20.0 {
                     let meters_rect = Rect::from_min_size(
                         Pos2::new(right_x - meters_w, btn_y),
                         Vec2::new(meters_w, btn_h),
                     );
-                    draw_recessed_box(painter, meters_rect, Color32::from_rgb(210, 210, 210));
-                    let ws_led_color = if connected {
-                        BEOS_LED_GREEN
-                    } else {
-                        BEOS_LED_RED
-                    };
+                    draw_tray_well(painter, meters_rect);
                     draw_beos_led(
                         painter,
                         Pos2::new(meters_rect.min.x + 5.0, meters_rect.center().y - 4.0),
-                        ws_led_color,
+                        if connected { BEOS_LED_GREEN } else { BEOS_LED_RED },
                     );
 
                     if let Some(m) = metrics {
@@ -205,8 +243,7 @@ impl BeDeskbar {
                                 if let Some(u) = v.gpu_util_percent {
                                     (u / 100.0).clamp(0.0, 1.0)
                                 } else if v.gpu_vram_total_mb > 0 {
-                                    (v.gpu_vram_used_mb as f32 / v.gpu_vram_total_mb as f32)
-                                        .clamp(0.0, 1.0)
+                                    (v.gpu_vram_used_mb as f32 / v.gpu_vram_total_mb as f32).clamp(0.0, 1.0)
                                 } else {
                                     0.0
                                 }
@@ -214,55 +251,31 @@ impl BeDeskbar {
                             .unwrap_or(0.0);
                         let bar_x = meters_rect.min.x + 17.0;
                         let bar_w = 54.0;
-                        let cpu_bar = Rect::from_min_size(
-                            Pos2::new(bar_x, meters_rect.min.y + 3.0),
-                            Vec2::new(bar_w, 4.0),
-                        );
-                        painter.rect_filled(cpu_bar, CornerRadius::ZERO, Color32::from_rgb(70, 70, 70));
-                        painter.rect_filled(
-                            Rect::from_min_size(cpu_bar.min, Vec2::new(bar_w * cpu_frac, 4.0)),
-                            CornerRadius::ZERO,
-                            BEOS_STATUS_GREEN,
-                        );
-                        let mem_bar = Rect::from_min_size(
-                            Pos2::new(bar_x, meters_rect.min.y + 9.0),
-                            Vec2::new(bar_w, 4.0),
-                        );
-                        painter.rect_filled(mem_bar, CornerRadius::ZERO, Color32::from_rgb(70, 70, 70));
-                        painter.rect_filled(
-                            Rect::from_min_size(mem_bar.min, Vec2::new(bar_w * mem_frac, 4.0)),
-                            CornerRadius::ZERO,
-                            BEOS_TAB_YELLOW,
-                        );
-                        let gpu_bar = Rect::from_min_size(
-                            Pos2::new(bar_x, meters_rect.min.y + 15.0),
-                            Vec2::new(bar_w, 4.0),
-                        );
-                        painter.rect_filled(gpu_bar, CornerRadius::ZERO, Color32::from_rgb(70, 70, 70));
-                        painter.rect_filled(
-                            Rect::from_min_size(gpu_bar.min, Vec2::new(bar_w * gpu_frac, 4.0)),
-                            CornerRadius::ZERO,
-                            Color32::from_rgb(76, 168, 240),
-                        );
+                        let bg_bar = Color32::from_rgb(52, 58, 68);
+                        for (dy, frac, col) in [
+                            (3.0, cpu_frac, BEOS_STATUS_GREEN),
+                            (9.0, mem_frac, p.accent),
+                            (15.0, gpu_frac, p.status_sky),
+                        ] {
+                            let r = Rect::from_min_size(Pos2::new(bar_x, meters_rect.min.y + dy), Vec2::new(bar_w, 4.0));
+                            painter.rect_filled(r, CornerRadius::ZERO, bg_bar);
+                            painter.rect_filled(
+                                Rect::from_min_size(r.min, Vec2::new(bar_w * frac, 4.0)),
+                                CornerRadius::ZERO,
+                                col,
+                            );
+                        }
                         painter.text(
                             Pos2::new(meters_rect.max.x - 5.0, meters_rect.center().y),
                             egui::Align2::RIGHT_CENTER,
                             format!("{:.0}%", m.cpu_percent),
-                            egui::FontId::monospace(10.5),
-                            Color32::BLACK,
+                            egui::FontId::monospace(10.0),
+                            p.text,
                         );
-                        let gpu_tip = latest_vital
-                            .map(|v| {
-                                format!(
-                                    "\nGPU VRAM: {} / {} MiB",
-                                    v.gpu_vram_used_mb, v.gpu_vram_total_mb
-                                )
-                            })
-                            .unwrap_or_default();
                         if ui
                             .interact(meters_rect, Id::unique("topbar_metrics"), Sense::click())
                             .on_hover_text(format!(
-                                "{}\nCPU: {:.1}%\nRAM: {} / {} MiB{gpu_tip}\nUptime: {}\n(Click to open Vitals)",
+                                "{}\nCPU: {:.1}% · RAM: {}/{} MiB · Uptime: {}\n(Click to open Vitals)",
                                 m.hostname,
                                 m.cpu_percent,
                                 m.mem_used_mb,
@@ -278,25 +291,25 @@ impl BeDeskbar {
                             Pos2::new(meters_rect.max.x - 6.0, meters_rect.center().y),
                             egui::Align2::RIGHT_CENTER,
                             if connected { "sync..." } else { "offline" },
-                            egui::FontId::monospace(10.5),
-                            Color32::from_rgb(60, 60, 60),
+                            egui::FontId::monospace(10.0),
+                            p.text_muted,
                         );
                     }
-                    right_x = meters_rect.min.x - 6.0;
+                    right_x = meters_rect.min.x - 5.0;
                 }
 
-                // 3) Services LED Tray Pill
+                // 4) Services LED Pill
                 let running_units = units.iter().filter(|u| u.running).count();
                 let failed_units = units.iter().filter(|u| u.active_state == "failed").count();
-                let svc_label = format!("Svc: {running_units}/{}", units.len());
-                let svc_w = (svc_label.len() as f32 * 6.5 + 24.0).max(80.0);
-                if right_x - svc_w > left_x + 40.0 {
+                let svc_label = format!("Svc {running_units}/{}", units.len());
+                let svc_w = (svc_label.len() as f32 * 6.2 + 22.0).max(74.0);
+                if right_x - svc_w > left_x + 20.0 {
                     let svc_rect = Rect::from_min_size(
                         Pos2::new(right_x - svc_w, btn_y),
                         Vec2::new(svc_w, btn_h),
                     );
-                    draw_recessed_box(painter, svc_rect, Color32::from_rgb(210, 210, 210));
-                    let led_col = if failed_units > 0 {
+                    draw_tray_well(painter, svc_rect);
+                    let led = if failed_units > 0 {
                         BEOS_LED_RED
                     } else if running_units > 0 {
                         BEOS_LED_GREEN
@@ -306,20 +319,17 @@ impl BeDeskbar {
                     draw_beos_led(
                         painter,
                         Pos2::new(svc_rect.min.x + 5.0, svc_rect.center().y - 4.0),
-                        led_col,
+                        led,
                     );
                     painter.text(
-                        Pos2::new(svc_rect.min.x + 18.0, svc_rect.center().y),
+                        Pos2::new(svc_rect.min.x + 17.0, svc_rect.center().y),
                         egui::Align2::LEFT_CENTER,
                         &svc_label,
-                        egui::FontId::proportional(11.0),
-                        Color32::BLACK,
+                        egui::FontId::monospace(10.5),
+                        p.text,
                     );
                     if ui
                         .interact(svc_rect, Id::unique("topbar_svc_pill"), Sense::click())
-                        .on_hover_text(format!(
-                            "Systemd Services: {running_units} running, {failed_units} failed (click to inspect)"
-                        ))
                         .clicked()
                     {
                         action = Some(DeskbarAction::OpenSystemdInspector {
@@ -331,170 +341,81 @@ impl BeDeskbar {
                             },
                         });
                     }
-                    right_x = svc_rect.min.x - 6.0;
+                    right_x = svc_rect.min.x - 5.0;
                 }
 
-                // 4) NixOS LED Tray Pill
-                if let Some(info) = nixos
-                    && info.is_nixos
-                {
-                    let nix_label = info
-                        .generation
-                        .map(|g| format!("NixOS #{g}"))
-                        .unwrap_or_else(|| "NixOS".into());
-                    let nix_w = (nix_label.len() as f32 * 6.6 + 24.0).max(74.0);
-                    if right_x - nix_w > left_x + 40.0 {
-                        let nix_rect = Rect::from_min_size(
-                            Pos2::new(right_x - nix_w, btn_y),
-                            Vec2::new(nix_w, btn_h),
+                // 5) Tailscale Node Identity Pill (with NixOS gen tooltip)
+                let ts_dns = dashboard
+                    .filter(|d| d.tailscale.available && !d.tailscale.dns_name.is_empty())
+                    .map(|d| d.tailscale.dns_name.as_str())
+                    .or_else(|| metrics.map(|m| m.hostname.as_str()));
+                if let Some(node_label) = ts_dns {
+                    let short: String = node_label.chars().take(24).collect();
+                    let w = (short.len() as f32 * 6.2 + 22.0).max(72.0);
+                    if right_x - w > left_x + 20.0 {
+                        let r = Rect::from_min_size(
+                            Pos2::new(right_x - w, btn_y),
+                            Vec2::new(w, btn_h),
                         );
-                        draw_recessed_box(painter, nix_rect, Color32::from_rgb(210, 210, 210));
+                        draw_tray_well(painter, r);
                         draw_beos_led(
                             painter,
-                            Pos2::new(nix_rect.min.x + 5.0, nix_rect.center().y - 4.0),
-                            BEOS_LED_GREEN,
+                            Pos2::new(r.min.x + 5.0, r.center().y - 4.0),
+                            p.status_sky,
                         );
                         painter.text(
-                            Pos2::new(nix_rect.min.x + 18.0, nix_rect.center().y),
+                            Pos2::new(r.min.x + 17.0, r.center().y),
                             egui::Align2::LEFT_CENTER,
-                            &nix_label,
-                            egui::FontId::proportional(11.0),
-                            Color32::BLACK,
+                            &short,
+                            egui::FontId::monospace(10.5),
+                            p.status_sky,
                         );
-                        let sys_path = info.current_system.as_deref().unwrap_or("n/a");
-                        ui.interact(nix_rect, Id::unique("topbar_nixos_pill"), Sense::hover())
-                            .on_hover_text(format!("{}\nSystem: {sys_path}", info.pretty_name));
-                        right_x = nix_rect.min.x - 6.0;
+                        let nix_tip = nixos
+                            .filter(|n| n.is_nixos)
+                            .map(|n| format!("{} (gen #{:?})", n.pretty_name, n.generation))
+                            .unwrap_or_default();
+                        if ui
+                            .interact(r, Id::unique("topbar_ts_node"), Sense::click())
+                            .on_hover_text(format!("Tailscale Node: {node_label}\n{nix_tip}\n(Click to inspect Tailscale)"))
+                            .clicked()
+                        {
+                            action = Some(DeskbarAction::OpenTailscale);
+                        }
+                        right_x = r.min.x - 5.0;
                     }
                 }
 
-                // --- MIDDLE STRIP: Running Window Buttons (fill space between left_x and right_x) ---
-                let mut win_x = left_x + 4.0;
-                for group in groups {
-                    for (idx, tab) in group.tabs.iter().enumerate() {
-                        let badge = match tab.kind {
-                            PaneKind::Terminal(_) => ">_",
-                            PaneKind::SystemdInspector { .. } => "SYS",
-                            PaneKind::DockerInspector { .. } => "CTR",
-                            PaneKind::SystemMonitor => "MON",
-                            PaneKind::AiJobs => "AI",
-                            PaneKind::HttpPorts { .. } => "NET",
-                            PaneKind::TailscalePanel => "TS",
-                            PaneKind::FileTracker(_) => "TRK",
-                            PaneKind::Vitals(_) => "VIT",
-                        };
-                        let short_title: String = tab.title.chars().take(18).collect();
-                        let label = format!("[{badge}] {short_title}");
-                        let w = (label.len() as f32 * 6.4 + 16.0).clamp(84.0, 152.0);
-                        if win_x + w > right_x - 4.0 {
+                // --- MIDDLE: Active Port Badges (:8188, :8765, :8888, :9090) ---
+                if let Some(dash) = dashboard {
+                    let mut px = left_x + 8.0;
+                    for port in dash
+                        .listening_ports
+                        .iter()
+                        .filter(|p| p.tailscale_url.is_some())
+                        .take(4)
+                    {
+                        let label = format!(":{}", port.port);
+                        let w = (label.len() as f32 * 6.4 + 10.0).max(38.0);
+                        if px + w > right_x - 8.0 {
                             break;
                         }
-                        let item_rect = Rect::from_min_size(Pos2::new(win_x, btn_y), Vec2::new(w, btn_h));
-                        let is_active = idx == group.active_tab && !group.shaded;
-                        let resp = ui.interact(
-                            item_rect,
-                            Id::unique(("topbar_win", group.id, tab.id)),
-                            Sense::click(),
-                        );
-                        let fill = if is_active {
-                            BEOS_PANEL_LO
-                        } else if resp.hovered() {
-                            Color32::from_rgb(240, 240, 240)
-                        } else {
-                            BEOS_WIDGET_FACE
-                        };
-                        painter.rect_filled(item_rect, CornerRadius::ZERO, fill);
-                        draw_beos_bevel(painter, item_rect, is_active);
+                        let r = Rect::from_min_size(Pos2::new(px, btn_y + 1.0), Vec2::new(w, btn_h - 2.0));
+                        draw_tray_well(painter, r);
                         painter.text(
-                            Pos2::new(item_rect.min.x + 6.0, item_rect.center().y),
-                            egui::Align2::LEFT_CENTER,
+                            r.center(),
+                            egui::Align2::CENTER_CENTER,
                             &label,
-                            egui::FontId::proportional(11.5),
-                            Color32::BLACK,
+                            egui::FontId::monospace(10.0),
+                            p.status_green,
                         );
-                        if resp.clicked() {
-                            self.menu_open = false;
-                            action = Some(DeskbarAction::FocusWindow {
-                                group_id: group.id,
-                                tab_idx: idx,
-                            });
+                        if ui
+                            .interact(r, Id::unique(("topbar_port", port.port)), Sense::click())
+                            .on_hover_text(format!("{} ({})", port.label, port.tailscale_url.as_deref().unwrap_or("")))
+                            .clicked()
+                        {
+                            action = Some(DeskbarAction::OpenHttpPorts);
                         }
-                        win_x = item_rect.max.x + 4.0;
-                    }
-                }
-
-                // --- DROPDOWN LAUNCHER MENU ---
-                if self.menu_open {
-                    let menu_pos = Pos2::new(bar_rect.min.x + 6.0, bar_rect.max.y);
-                    let menu_items: Vec<(&str, &str, DeskbarAction)> = vec![
-                        ("Tracker (Files)", "TRK", DeskbarAction::OpenFileTracker),
-                        ("New Terminal", ">_", DeskbarAction::NewTerminal),
-                        (
-                            "Systemd Services",
-                            "All",
-                            DeskbarAction::OpenSystemdInspector {
-                                scope: ScopeFilter::All,
-                                state: StateFilter::All,
-                            },
-                        ),
-                        (
-                            "Running Services",
-                            "Run",
-                            DeskbarAction::OpenSystemdInspector {
-                                scope: ScopeFilter::All,
-                                state: StateFilter::Running,
-                            },
-                        ),
-                        (
-                            "Enabled Services",
-                            "En",
-                            DeskbarAction::OpenSystemdInspector {
-                                scope: ScopeFilter::All,
-                                state: StateFilter::Enabled,
-                            },
-                        ),
-                        ("Containers", "CTR", DeskbarAction::OpenDockerInspector),
-                        ("GPU / CPU / Memory", "MON", DeskbarAction::OpenSystemMonitor),
-                        ("Vitals (Telemetry)", "VIT", DeskbarAction::OpenVitals),
-                        ("Bottom (btm)", "BTM", DeskbarAction::OpenBottom),
-                        ("ComfyUI & Unsloth", "AI", DeskbarAction::OpenAiJobs),
-                        ("HTTP Ports", "NET", DeskbarAction::OpenHttpPorts),
-                        ("Tailscale Mesh", "TS", DeskbarAction::OpenTailscale),
-                        ("Show / Hide Tracker", "Left", DeskbarAction::ToggleTracker),
-                        ("Tile Windows", "Grid", DeskbarAction::TileWindows),
-                    ];
-                    let menu_h = menu_items.len() as f32 * 24.0 + 8.0;
-                    let menu_rect = Rect::from_min_size(menu_pos, Vec2::new(196.0, menu_h));
-                    painter.rect_filled(menu_rect, CornerRadius::ZERO, BEOS_PANEL_GRAY);
-                    draw_beos_bevel(painter, menu_rect, false);
-
-                    for (i, (label, meta, act)) in menu_items.into_iter().enumerate() {
-                        let r = Rect::from_min_size(
-                            Pos2::new(menu_pos.x + 3.0, menu_pos.y + 4.0 + i as f32 * 24.0),
-                            Vec2::new(190.0, 23.0),
-                        );
-                        let resp = ui.interact(r, Id::unique(("topbar_menu", i)), Sense::click());
-                        if resp.hovered() {
-                            painter.rect_filled(r, CornerRadius::ZERO, BEOS_TAB_YELLOW);
-                        }
-                        painter.text(
-                            Pos2::new(r.min.x + 8.0, r.center().y),
-                            egui::Align2::LEFT_CENTER,
-                            label,
-                            egui::FontId::proportional(12.0),
-                            Color32::BLACK,
-                        );
-                        painter.text(
-                            Pos2::new(r.max.x - 8.0, r.center().y),
-                            egui::Align2::RIGHT_CENTER,
-                            meta,
-                            egui::FontId::monospace(10.5),
-                            Color32::from_rgb(75, 75, 75),
-                        );
-                        if resp.clicked() {
-                            self.menu_open = false;
-                            action = Some(act);
-                        }
+                        px = r.max.x + 4.0;
                     }
                 }
             });
@@ -503,18 +424,10 @@ impl BeDeskbar {
     }
 }
 
-fn draw_recessed_box(painter: &egui::Painter, rect: Rect, fill: Color32) {
-    painter.rect_filled(rect, CornerRadius::ZERO, fill);
-    painter.line_segment([rect.left_top(), rect.right_top()], Stroke::new(1.0, BEOS_BEVEL_DARK));
-    painter.line_segment([rect.left_top(), rect.left_bottom()], Stroke::new(1.0, BEOS_BEVEL_DARK));
-    painter.line_segment(
-        [rect.left_bottom(), rect.right_bottom()],
-        Stroke::new(1.0, BEOS_BEVEL_LIGHT),
-    );
-    painter.line_segment(
-        [rect.right_top(), rect.right_bottom()],
-        Stroke::new(1.0, BEOS_BEVEL_LIGHT),
-    );
+fn draw_tray_well(painter: &egui::Painter, rect: Rect) {
+    let p = palette();
+    painter.rect_filled(rect, CornerRadius::ZERO, p.well);
+    draw_beos_bevel(painter, rect, true);
 }
 
 fn draw_beos_led(painter: &egui::Painter, top_left: Pos2, color: Color32) {
@@ -522,19 +435,6 @@ fn draw_beos_led(painter: &egui::Painter, top_left: Pos2, color: Color32) {
     painter.rect_filled(rect, CornerRadius::ZERO, color);
     painter.rect_stroke(
         rect,
-        CornerRadius::ZERO,
-        Stroke::new(1.0, BEOS_BORDER_BLACK),
-        egui::StrokeKind::Inside,
-    );
-}
-
-fn draw_mini_folder(painter: &egui::Painter, top_left: Pos2) {
-    let tab = Rect::from_min_size(top_left, Vec2::new(5.5, 2.5));
-    let body = Rect::from_min_size(top_left + Vec2::new(0.0, 2.0), Vec2::new(12.0, 8.0));
-    painter.rect_filled(tab, CornerRadius::ZERO, BEOS_TAB_YELLOW);
-    painter.rect_filled(body, CornerRadius::ZERO, BEOS_TAB_YELLOW);
-    painter.rect_stroke(
-        body,
         CornerRadius::ZERO,
         Stroke::new(1.0, BEOS_BORDER_BLACK),
         egui::StrokeKind::Inside,
@@ -556,23 +456,16 @@ fn format_uptime(secs: u64) -> String {
 
 /// Crisp geometric Crow silhouette emblem (Kannada: kāge)
 fn draw_crow_emblem(painter: &egui::Painter, center: Pos2) {
+    let p = palette();
     let body = vec![
-        Pos2::new(center.x - 7.0, center.y + 4.0),
+        Pos2::new(center.x - 6.0, center.y + 4.0),
         Pos2::new(center.x - 2.0, center.y - 5.0),
         Pos2::new(center.x + 3.0, center.y - 5.0),
-        Pos2::new(center.x + 8.0, center.y - 2.0), // Beak tip
+        Pos2::new(center.x + 7.0, center.y - 2.0),
         Pos2::new(center.x + 3.0, center.y),
         Pos2::new(center.x + 1.0, center.y + 5.0),
     ];
-    painter.add(egui::Shape::convex_polygon(
-        body,
-        BEOS_BORDER_BLACK,
-        Stroke::NONE,
-    ));
-    // Amber eye dot
-    painter.circle_filled(
-        Pos2::new(center.x + 2.0, center.y - 3.0),
-        1.2,
-        BEOS_TAB_YELLOW,
-    );
+    let fill = if p.is_dark { p.text } else { BEOS_BORDER_BLACK };
+    painter.add(egui::Shape::convex_polygon(body, fill, Stroke::NONE));
+    painter.circle_filled(Pos2::new(center.x + 2.0, center.y - 3.0), 1.3, p.accent);
 }

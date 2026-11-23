@@ -1,7 +1,6 @@
 use crate::theme::{
-    BEOS_BEVEL_DARK, BEOS_BORDER_BLACK, BEOS_DESKTOP_BLUE, BEOS_LED_GOLD, BEOS_LED_GREEN,
-    BEOS_LED_RED, BEOS_STATUS_GREEN, BEOS_STATUS_RED, BEOS_TAB_YELLOW, BEOS_WELL_WHITE, be_button,
-    be_toggle_button, draw_beos_bevel,
+    BEOS_DESKTOP_BLUE, BEOS_LED_GOLD, BEOS_LED_GREEN, BEOS_LED_RED, BEOS_STATUS_GREEN,
+    BEOS_STATUS_RED, BEOS_TAB_YELLOW, be_button, be_toggle_button, draw_beos_bevel,
 };
 use egui::{
     Color32, CornerRadius, Pos2, Rect, RichText, ScrollArea, Sense, Stroke, Ui, Vec2,
@@ -133,7 +132,7 @@ impl VitalsWindow {
 
         // Top Control Bar
         ui.horizontal_wrapped(|ui| {
-            ui.label(RichText::new("Window:").strong().color(Color32::BLACK));
+            ui.label(RichText::new("Window:").strong().color(crate::theme::text_color()));
             for w in [
                 TimeWindow::Min1,
                 TimeWindow::Min5,
@@ -465,7 +464,7 @@ impl VitalsWindow {
                                     .color(if nic.is_tailscale {
                                         BEOS_DESKTOP_BLUE
                                     } else {
-                                        Color32::BLACK
+                                        crate::theme::text_color()
                                     }),
                             );
                             ui.label(
@@ -485,7 +484,7 @@ impl VitalsWindow {
                 ui.add_space(6.0);
                 ui.separator();
                 ui.horizontal_wrapped(|ui| {
-                    ui.label(RichText::new("Processes:").strong().color(Color32::BLACK));
+                    ui.label(RichText::new("Processes:").strong().color(crate::theme::text_color()));
                     ui.add(egui::TextEdit::singleline(&mut self.proc_filter).desired_width(140.0));
                     for (label, sort) in [
                         ("CPU", ProcSort::Cpu),
@@ -542,7 +541,7 @@ impl VitalsWindow {
                                 sum_mem
                             ))
                             .strong()
-                            .color(Color32::BLACK),
+                            .color(crate::theme::text_color()),
                         )
                         .default_open(unit_name.ends_with(".service"))
                         .show(ui, |ui| {
@@ -588,13 +587,14 @@ fn render_beos_chart(
     let mut hovered_frac = None;
     let mut zoom_result = None;
 
+    let pal = crate::theme::palette();
     egui::Frame::NONE
-        .fill(BEOS_WELL_WHITE)
-        .stroke(Stroke::new(1.0, BEOS_BEVEL_DARK))
+        .fill(pal.well)
+        .stroke(Stroke::new(1.0, pal.border))
         .inner_margin(4.0)
         .show(ui, |ui| {
             ui.horizontal(|ui| {
-                ui.label(RichText::new(title).strong().size(11.0).color(Color32::BLACK));
+                ui.label(RichText::new(title).strong().size(11.0).color(crate::theme::text_color()));
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     ui.label(
                         RichText::new(callout)
@@ -774,7 +774,7 @@ fn render_pulse_cores(ui: &mut Ui, cores: &[f32], load_avg: [f32; 3]) {
             ))
             .strong()
             .size(11.0)
-            .color(Color32::BLACK),
+            .color(crate::theme::text_color()),
         );
     });
     let avail_w = ui.available_width().max(120.0);
@@ -819,7 +819,7 @@ fn render_process_row(
                 .size(10.5)
                 .color(Color32::from_rgb(80, 80, 80)),
         );
-        ui.label(RichText::new(&p.name).strong().size(11.0).color(Color32::BLACK));
+        ui.label(RichText::new(&p.name).strong().size(11.0).color(crate::theme::text_color()));
         if let Some(ref unit) = p.unit
             && ui
                 .small_button(RichText::new(format!("● {unit}")).size(10.0).color(BEOS_STATUS_GREEN))
@@ -877,9 +877,10 @@ fn psi_pill(ui: &mut Ui, label: &str, some10: f32, full10: f32) {
     } else {
         BEOS_LED_GREEN
     };
+    let pal = crate::theme::palette();
     egui::Frame::NONE
-        .fill(Color32::from_rgb(228, 228, 228))
-        .stroke(Stroke::new(1.0, BEOS_BORDER_BLACK))
+        .fill(pal.surface_alt)
+        .stroke(Stroke::new(1.0, pal.border))
         .inner_margin(egui::Margin::symmetric(5, 2))
         .show(ui, |ui| {
             ui.horizontal(|ui| {
@@ -889,7 +890,7 @@ fn psi_pill(ui: &mut Ui, label: &str, some10: f32, full10: f32) {
                     RichText::new(format!("{label} {some10:.1}%/{full10:.1}%"))
                         .monospace()
                         .size(10.0)
-                        .color(Color32::BLACK),
+                        .color(crate::theme::text_color()),
                 );
             });
         });

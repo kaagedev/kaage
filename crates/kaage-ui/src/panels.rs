@@ -1,8 +1,7 @@
 use crate::inspectors::InspectorSpawnRequest;
 use crate::theme::{
     BEOS_BEVEL_DARK, BEOS_BEVEL_LIGHT, BEOS_BORDER_BLACK, BEOS_DESKTOP_BLUE, BEOS_LED_GOLD,
-    BEOS_LED_GREEN, BEOS_LED_RED, BEOS_STATUS_GREEN, BEOS_STATUS_RED, BEOS_TAB_YELLOW,
-    BEOS_WELL_WHITE, be_button,
+    BEOS_LED_GREEN, BEOS_LED_RED, BEOS_STATUS_GREEN, BEOS_STATUS_RED, BEOS_TAB_YELLOW, be_button,
 };
 use egui::{Color32, CornerRadius, Pos2, Rect, RichText, ScrollArea, Sense, Stroke, Ui, Vec2};
 use kaage_proto::{ClientMsg, DashboardSnapshot};
@@ -21,7 +20,7 @@ pub fn render_system_monitor(
         ui.label(
             RichText::new("Host Compute: GPU · CPU · Memory")
                 .strong()
-                .color(Color32::BLACK),
+                .color(crate::theme::text_color()),
         );
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             if be_button(ui, "Refresh").clicked() {
@@ -67,7 +66,7 @@ pub fn render_system_monitor(
                 for gpu in &dash.gpus {
                     be_card(ui, |ui| {
                         ui.horizontal(|ui| {
-                            ui.label(RichText::new(&gpu.name).strong().color(Color32::BLACK));
+                            ui.label(RichText::new(&gpu.name).strong().color(crate::theme::text_color()));
                             ui.label(
                                 RichText::new(format!("[{}]", gpu.source))
                                     .monospace()
@@ -144,7 +143,7 @@ pub fn render_system_monitor(
                     } else {
                         format!("{} ({} threads)", dash.cpu_brand, dash.cpu_cores.len())
                     };
-                    ui.label(RichText::new(brand).strong().size(11.5).color(Color32::BLACK));
+                    ui.label(RichText::new(brand).strong().size(11.5).color(crate::theme::text_color()));
                 });
                 progress_row(
                     ui,
@@ -198,7 +197,7 @@ pub fn render_system_monitor(
                                     egui::Align2::CENTER_CENTER,
                                     format!("{usage:.0}%"),
                                     egui::FontId::monospace(9.0),
-                                    Color32::BLACK,
+                                    crate::theme::text_color(),
                                 );
                             }
                         });
@@ -263,7 +262,7 @@ pub fn render_system_monitor(
                                     .size(10.5)
                                     .color(Color32::from_rgb(85, 85, 85)),
                             );
-                            ui.label(RichText::new(&p.name).size(11.0).color(Color32::BLACK));
+                            ui.label(RichText::new(&p.name).size(11.0).color(crate::theme::text_color()));
                             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                                 ui.label(
                                     RichText::new(format!("{} MiB  |  CPU {:.1}%", p.mem_mb, p.cpu_percent))
@@ -293,7 +292,7 @@ pub fn render_ai_jobs(
         ui.label(
             RichText::new("AI Workloads: ComfyUI · Unsloth Studio")
                 .strong()
-                .color(Color32::BLACK),
+                .color(crate::theme::text_color()),
         );
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             if be_button(ui, "Refresh").clicked() {
@@ -329,7 +328,7 @@ pub fn render_ai_jobs(
                     ui.label(
                         RichText::new(format!("ComfyUI{ver}"))
                             .strong()
-                            .color(Color32::BLACK),
+                            .color(crate::theme::text_color()),
                     );
                     ui.label(
                         RichText::new(&c.url)
@@ -369,7 +368,7 @@ pub fn render_ai_jobs(
                             c.pending_jobs.len()
                         ))
                         .size(11.5)
-                        .color(Color32::BLACK),
+                        .color(crate::theme::text_color()),
                     );
                     if c.running_jobs.is_empty() && c.pending_jobs.is_empty() {
                         ui.label(
@@ -387,7 +386,7 @@ pub fn render_ai_jobs(
                                     BEOS_LED_GOLD
                                 };
                                 status_led(ui, col);
-                                ui.label(RichText::new(&job.title).strong().size(11.5).color(Color32::BLACK));
+                                ui.label(RichText::new(&job.title).strong().size(11.5).color(crate::theme::text_color()));
                                 ui.label(
                                     RichText::new(format!("[{}] {}", job.state, job.detail))
                                         .monospace()
@@ -411,7 +410,7 @@ pub fn render_ai_jobs(
                     ui.label(
                         RichText::new(&u.service_name)
                             .strong()
-                            .color(Color32::BLACK),
+                            .color(crate::theme::text_color()),
                     );
                     ui.label(
                         RichText::new(&u.url)
@@ -466,7 +465,7 @@ pub fn render_ai_jobs(
                                     .size(10.5)
                                     .color(Color32::from_rgb(80, 80, 80)),
                             );
-                            ui.label(RichText::new(&job.title).strong().size(11.5).color(Color32::BLACK));
+                            ui.label(RichText::new(&job.title).strong().size(11.5).color(crate::theme::text_color()));
                             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                                 ui.label(
                                     RichText::new(&job.detail)
@@ -492,7 +491,7 @@ pub fn render_http_ports(
     send_msg: &mut dyn FnMut(ClientMsg),
 ) {
     ui.horizontal(|ui| {
-        ui.label(RichText::new("Filter:").color(Color32::BLACK));
+        ui.label(RichText::new("Filter:").color(crate::theme::text_color()));
         ui.add(egui::TextEdit::singleline(filter).desired_width(160.0));
         if be_button(ui, "Refresh").clicked() {
             send_msg(ClientMsg::RefreshDashboard);
@@ -546,7 +545,7 @@ pub fn render_http_ports(
                                 .size(12.5)
                                 .color(BEOS_DESKTOP_BLUE),
                         );
-                        ui.label(RichText::new(&p.label).strong().color(Color32::BLACK));
+                        ui.label(RichText::new(&p.label).strong().color(crate::theme::text_color()));
                         if !p.process.is_empty() {
                             let pid_part = p
                                 .pid
@@ -599,7 +598,7 @@ pub fn render_tailscale_panel(
         ui.label(
             RichText::new("Tailscale Mesh & Serve Status")
                 .strong()
-                .color(Color32::BLACK),
+                .color(crate::theme::text_color()),
         );
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             if be_button(ui, "Refresh").clicked() {
@@ -642,7 +641,7 @@ pub fn render_tailscale_panel(
                     ui.label(
                         RichText::new(format!("{}  ({})", ts.hostname, ts.backend_state))
                             .strong()
-                            .color(Color32::BLACK),
+                            .color(crate::theme::text_color()),
                     );
                     ui.label(
                         RichText::new(format!("v{}", ts.version))
@@ -734,7 +733,7 @@ pub fn render_tailscale_panel(
                                 RichText::new(&peer.hostname)
                                     .strong()
                                     .size(11.5)
-                                    .color(Color32::BLACK),
+                                    .color(crate::theme::text_color()),
                             );
                             ui.label(
                                 RichText::new(format!("[{}]", peer.os))
@@ -773,27 +772,29 @@ pub fn render_tailscale_panel(
 }
 
 fn section_banner(ui: &mut Ui, title: &str) {
+    let pal = crate::theme::palette();
     let w = ui.available_width();
     let (rect, _) = ui.allocate_exact_size(Vec2::new(w, 18.0), Sense::hover());
     let p = ui.painter();
-    p.rect_filled(rect, CornerRadius::ZERO, Color32::from_rgb(206, 212, 220));
+    p.rect_filled(rect, CornerRadius::ZERO, pal.section_bg);
     p.line_segment(
         [rect.left_bottom(), rect.right_bottom()],
-        Stroke::new(1.0, BEOS_BEVEL_DARK),
+        Stroke::new(1.0, pal.border),
     );
     p.text(
         Pos2::new(rect.min.x + 6.0, rect.center().y),
         egui::Align2::LEFT_CENTER,
         title,
-        egui::FontId::proportional(10.5),
-        Color32::from_rgb(35, 45, 60),
+        egui::FontId::monospace(10.0),
+        pal.text_muted,
     );
 }
 
 fn be_card(ui: &mut Ui, add_contents: impl FnOnce(&mut Ui)) {
+    let pal = crate::theme::palette();
     egui::Frame::NONE
-        .fill(BEOS_WELL_WHITE)
-        .stroke(Stroke::new(1.0, BEOS_BEVEL_DARK))
+        .fill(pal.well)
+        .stroke(Stroke::new(1.0, pal.border))
         .inner_margin(6.0)
         .show(ui, |ui| {
             ui.set_min_width(ui.available_width());
@@ -819,7 +820,7 @@ fn progress_row(ui: &mut Ui, label: &str, frac: f32, value_text: &str, fill: Col
             RichText::new(format!("{label:<9}"))
                 .monospace()
                 .size(11.0)
-                .color(Color32::BLACK),
+                .color(crate::theme::text_color()),
         );
         let bar_w = 150.0_f32.min((ui.available_width() - 160.0).max(80.0));
         let (rect, _) = ui.allocate_exact_size(Vec2::new(bar_w, 13.0), Sense::hover());

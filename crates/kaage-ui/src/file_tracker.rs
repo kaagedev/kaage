@@ -223,7 +223,7 @@ impl TrackerWindow {
 
         if self.show_mkdir_bar {
             ui.horizontal(|ui| {
-                ui.label(RichText::new("Folder name:").color(Color32::BLACK));
+                ui.label(RichText::new("Folder name:").color(crate::theme::text_color()));
                 ui.text_edit_singleline(&mut self.new_folder_name);
                 if be_button(ui, "Create").clicked() && !self.new_folder_name.trim().is_empty() {
                     let pane = self.focused_pane();
@@ -251,7 +251,7 @@ impl TrackerWindow {
                     egui::Vec2::new(148.0, body_height),
                     egui::Layout::top_down(egui::Align::Min),
                     |ui| {
-                        ui.label(RichText::new("LOCATIONS").strong().color(Color32::BLACK));
+                        ui.label(RichText::new("LOCATIONS").strong().color(crate::theme::text_color()));
                         for (label, target) in [
                             ("Home (~)", "~"),
                             ("Projects", "~/projects"),
@@ -260,7 +260,7 @@ impl TrackerWindow {
                             ("Mounts (/mnt)", "/mnt"),
                         ] {
                             if ui
-                                .selectable_label(false, RichText::new(label).color(Color32::BLACK))
+                                .selectable_label(false, RichText::new(label).color(crate::theme::text_color()))
                                 .clicked()
                             {
                                 self.active_workspace = None;
@@ -274,7 +274,7 @@ impl TrackerWindow {
 
                         ui.separator();
                         ui.horizontal(|ui| {
-                            ui.label(RichText::new("WORKSPACES").strong().color(Color32::BLACK));
+                            ui.label(RichText::new("WORKSPACES").strong().color(crate::theme::text_color()));
                             if ui.small_button("+").clicked() {
                                 let path = self.focused_pane().path_input.clone();
                                 let ws = WorkspaceDef {
@@ -293,7 +293,7 @@ impl TrackerWindow {
                             if ui
                                 .selectable_label(
                                     selected,
-                                    RichText::new(&ws.name).color(Color32::BLACK),
+                                    RichText::new(&ws.name).color(crate::theme::text_color()),
                                 )
                                 .clicked()
                             {
@@ -319,7 +319,7 @@ impl TrackerWindow {
                                 panes[0].label(
                                     RichText::new(format!("Workspace: {}", ws.name))
                                         .strong()
-                                        .color(Color32::BLACK),
+                                        .color(crate::theme::text_color()),
                                 );
                                 panes[0].separator();
                                 for item in &ws.items {
@@ -330,7 +330,7 @@ impl TrackerWindow {
                                                 "[{:?}] {}",
                                                 item.kind, item.label
                                             ))
-                                            .color(Color32::BLACK),
+                                            .color(crate::theme::text_color()),
                                         )
                                         .clicked()
                                     {
@@ -410,13 +410,13 @@ impl TrackerWindow {
                 ui.label(
                     RichText::new(format!("Shelf ({}):", self.shelf.len()))
                         .strong()
-                        .color(Color32::BLACK),
+                        .color(crate::theme::text_color()),
                 );
                 for item in &self.shelf {
                     ui.label(
                         RichText::new(&item.name)
                             .background_color(BEOS_TAB_YELLOW)
-                            .color(Color32::BLACK),
+                            .color(crate::theme::text_color()),
                     );
                 }
                 if be_button(ui, "Move Here").clicked() {
@@ -489,7 +489,7 @@ fn render_folder_pane(
 
     ui.horizontal(|ui| {
         if focused {
-            ui.label(RichText::new("▶").color(Color32::BLACK));
+            ui.label(RichText::new("▶").color(crate::theme::text_color()));
         }
         if be_button(ui, "↑").clicked()
             && let Some(parent) = std::path::Path::new(&pane.path_input).parent()
@@ -517,20 +517,20 @@ fn render_folder_pane(
             ui.label(
                 RichText::new(label)
                     .background_color(BEOS_TAB_YELLOW)
-                    .color(Color32::BLACK),
+                    .color(crate::theme::text_color()),
             );
         }
     });
 
     ui.horizontal(|ui| {
-        ui.label(RichText::new("Filter:").color(Color32::BLACK));
+        ui.label(RichText::new("Filter:").color(crate::theme::text_color()));
         ui.text_edit_singleline(&mut pane.filter);
     });
     ui.separator();
 
     let (entries, disk_free_bytes, disk_total_bytes) = {
         let Some(listing) = &pane.listing else {
-            ui.label(RichText::new("Loading...").color(Color32::BLACK));
+            ui.label(RichText::new("Loading...").color(crate::theme::text_color()));
             return None;
         };
         let needle = pane.filter.to_lowercase();
@@ -564,7 +564,7 @@ fn render_folder_pane(
                     egui::CollapsingHeader::new(
                         RichText::new(format!("{kind_name} ({})", group_entries.len()))
                             .strong()
-                            .color(Color32::BLACK),
+                            .color(crate::theme::text_color()),
                     )
                     .default_open(true)
                     .show(ui, |ui| {
@@ -621,7 +621,7 @@ fn render_entry_row(
         let name_color = if entry.symlink_broken {
             BEOS_STATUS_RED
         } else {
-            Color32::BLACK
+            crate::theme::text_color()
         };
 
         let display_name = if let Some(ref target) = entry.symlink_target {
@@ -696,12 +696,12 @@ fn render_preview_pane(
     send_msg: &mut dyn FnMut(ClientMsg),
 ) {
     let Some(path) = preview_path else {
-        ui.label(RichText::new("Click any file to Peek").color(Color32::BLACK));
+        ui.label(RichText::new("Click any file to Peek").color(crate::theme::text_color()));
         return;
     };
 
     ui.horizontal(|ui| {
-        ui.label(RichText::new(path).strong().color(Color32::BLACK));
+        ui.label(RichText::new(path).strong().color(crate::theme::text_color()));
         if let Some(PreviewContent::Text {
             is_markdown: true, ..
         }) = preview
@@ -743,7 +743,7 @@ fn render_preview_pane(
                             .desired_width(f32::INFINITY),
                     );
                 } else {
-                    ui.label(RichText::new(content).monospace().color(Color32::BLACK));
+                    ui.label(RichText::new(content).monospace().color(crate::theme::text_color()));
                 }
             }
             Some(PreviewContent::ImageBytes { .. }) => {
@@ -753,20 +753,20 @@ fn render_preview_pane(
                     let scale = (max_w / tex_size.x.max(1.0)).min(1.0);
                     ui.image((tex.id(), tex_size * scale));
                 } else {
-                    ui.label(RichText::new("Could not decode image preview").color(Color32::BLACK));
+                    ui.label(RichText::new("Could not decode image preview").color(crate::theme::text_color()));
                 }
             }
             Some(PreviewContent::ModelHeader { format, metadata }) => {
                 ui.label(
                     RichText::new(format!("Format: {format}"))
                         .strong()
-                        .color(Color32::BLACK),
+                        .color(crate::theme::text_color()),
                 );
                 for (k, v) in metadata {
                     ui.label(
                         RichText::new(format!("{k}: {v}"))
                             .monospace()
-                            .color(Color32::BLACK),
+                            .color(crate::theme::text_color()),
                     );
                 }
             }
@@ -775,12 +775,12 @@ fn render_preview_pane(
                     ui.label(
                         RichText::new(format!("{rel} ({})", format_bytes(*sz)))
                             .monospace()
-                            .color(Color32::BLACK),
+                            .color(crate::theme::text_color()),
                     );
                 }
             }
             Some(PreviewContent::Unsupported { reason }) => {
-                ui.label(RichText::new(reason).color(Color32::BLACK));
+                ui.label(RichText::new(reason).color(crate::theme::text_color()));
             }
             None => {}
         });

@@ -3,6 +3,7 @@ mod deskbar;
 mod desktop_icons;
 mod file_tracker;
 mod inspectors;
+mod palette;
 mod panels;
 mod terminal;
 mod theme;
@@ -12,18 +13,19 @@ mod wm;
 
 use deskbar::{BeDeskbar, DeskbarAction};
 use desktop_icons::{DesktopIconAction, show_desktop_icons};
-use eframe::egui::{self, Color32, CornerRadius, Id, Pos2, Rect, Vec2};
+use eframe::egui::{self, Color32, CornerRadius, Id, Key, Pos2, Rect, Stroke, Vec2};
 use ewebsock::{WsEvent, WsMessage, WsReceiver, WsSender};
 use file_tracker::TrackerWindow;
 use inspectors::{InspectorSpawnRequest, ScopeFilter, StateFilter};
 use kaage_proto::{
-    ClientMsg, ContainerInfo, DashboardSnapshot, HostMetrics, NixosInfo, ServerMsg,
-    SystemdUnitInfo, SystemdUnitStatus, VitalsTick,
+    ClientMsg, ContainerInfo, DashboardSnapshot, FileOp, HostMetrics, NixosInfo, ServerMsg,
+    SystemdUnitInfo, SystemdUnitStatus, UnitAction, VitalsTick,
 };
+use palette::{CommandPalette, PaletteAction};
 use terminal::TerminalPane;
 use theme::{
-    BEOS_DESKTOP_BLUE, BEOS_PANEL_GRAY, BEOS_STATUS_GREEN, BEOS_STATUS_RED, TOPBAR_HEIGHT,
-    apply_beos_style, draw_beos_bevel,
+    TOPBAR_HEIGHT, ThemeMode, apply_theme, current_theme_mode, draw_beos_bevel, draw_dot_grid,
+    palette as active_palette,
 };
 use tracker::{BeTrackerSidebar, TrackerAction};
 use vitals::VitalsWindow;
@@ -36,16 +38,20 @@ struct ToastNotice {
     ok: bool,
     text: String,
     expires_at: f64,
+    undo_msg: Option<ClientMsg>,
 }
 
 struct KaageApp {
     ws_tx: WsSender,
     ws_rx: WsReceiver,
     connected: bool,
+    theme_mode: ThemeMode,
+    show_wallpaper: bool,
     wallpaper: Option<egui::TextureHandle>,
     wm: BeWindowManager,
     deskbar: BeDeskbar,
     tracker: BeTrackerSidebar,
+    cmd_palette: CommandPalette,
     nixos: Option<NixosInfo>,
     metrics: Option<HostMetrics>,
     latest_vital: Option<VitalsTick>,
@@ -57,6 +63,7 @@ struct KaageApp {
     containers: Vec<ContainerInfo>,
     next_pty_id: u32,
     next_tracker_pane_id: u64,
+    pending_undo: Option<ClientMsg>,
     toast: Option<ToastNotice>,
 }
 
@@ -75,7 +82,8 @@ fn load_wallpaper_texture(ctx: &egui::Context) -> Option<egui::TextureHandle> {
 
 impl KaageApp {
     fn new(cc: &eframe::CreationContext<'_>, ws_url: &str) -> Self {
-        apply_beos_style(&cc.egui_ctx);
+        let theme_mode = ThemeMode::ObsidianAmber;
+        apply_theme(&cc.egui_ctx, theme_mode);
         let wallpaper = load_wallpaper_texture(&cc.egui_ctx);
 
         let ctx_clone = cc.egui_ctx.clone();
@@ -90,7 +98,11 @@ impl KaageApp {
         let stage_x = tracker.width() + 24.0;
 
         let mut wm = BeWindowManager::new();
-        let main_gid = wm.open_window(
+
+        // Workspace 0 ("1: Ops"): Systemd Services + Terminal shell (BSP tiled side-by-side)
+        let ops_gid = wm.open_window_in_workspace(
+            0,
+            false,
             "Systemd Services".into(),
             PaneKind::SystemdInspector {
                 filter: String::new(),
@@ -100,33 +112,50 @@ impl KaageApp {
             Pos2::new(stage_x, TOPBAR_HEIGHT + 12.0),
             Vec2::new(720.0, 420.0),
         );
-        wm.add_tab_to_group(main_gid, "GPU / CPU / Mem".into(), PaneKind::SystemMonitor);
-        wm.add_tab_to_group(main_gid, "AI Jobs".into(), PaneKind::AiJobs);
-        wm.add_tab_to_group(
-            main_gid,
-            "HTTP Ports".into(),
-            PaneKind::HttpPorts {
-                filter: String::new(),
-            },
-        );
-        wm.add_tab_to_group(main_gid, "Tailscale".into(), PaneKind::TailscalePanel);
+        wm.add_tab_to_group(ops_gid, "HTTP Ports".into(), PaneKind::HttpPorts { filter: String::new() });
+        wm.add_tab_to_group(ops_gid, "Tailscale".into(), PaneKind::TailscalePanel);
 
         let initial_pty = 1;
-        wm.open_window(
+        wm.open_window_in_workspace(
+            0,
+            false,
             "Terminal — shell".into(),
             PaneKind::Terminal(TerminalPane::new(initial_pty, 80, 24)),
             Pos2::new(stage_x + 24.0, TOPBAR_HEIGHT + 464.0),
             Vec2::new(700.0, 320.0),
         );
 
+        // Workspace 1 ("2: AI"): AI Jobs + GPU/CPU/Mem Monitor
+        wm.open_window_in_workspace(
+            1,
+            false,
+            "AI Jobs".into(),
+            PaneKind::AiJobs,
+            Pos2::new(stage_x, TOPBAR_HEIGHT + 12.0),
+            Vec2::new(620.0, 420.0),
+        );
+        wm.open_window_in_workspace(
+            1,
+            false,
+            "GPU / CPU / Mem".into(),
+            PaneKind::SystemMonitor,
+            Pos2::new(stage_x, TOPBAR_HEIGHT + 12.0),
+            Vec2::new(620.0, 420.0),
+        );
+
+        wm.active_workspace = 0;
+
         Self {
             ws_tx,
             ws_rx,
             connected: false,
+            theme_mode,
+            show_wallpaper: true,
             wallpaper,
             wm,
             deskbar: BeDeskbar::new(),
             tracker,
+            cmd_palette: CommandPalette::new(),
             nixos: None,
             metrics: None,
             latest_vital: None,
@@ -138,11 +167,33 @@ impl KaageApp {
             containers: Vec::new(),
             next_pty_id: 2,
             next_tracker_pane_id: 1,
+            pending_undo: None,
             toast: None,
         }
     }
 
     fn send_client_msg(&mut self, msg: ClientMsg) {
+        // Track reversible actions for the interactive Undo button on ActionFeedback toasts
+        match &msg {
+            ClientMsg::ControlUnit {
+                unit,
+                scope,
+                action: UnitAction::Stop,
+            } => {
+                self.pending_undo = Some(ClientMsg::ControlUnit {
+                    unit: unit.clone(),
+                    scope: *scope,
+                    action: UnitAction::Start,
+                });
+            }
+            ClientMsg::PerformFileOp {
+                pane_id,
+                op: FileOp::Trash { .. } | FileOp::Move { .. } | FileOp::Rename { .. },
+            } => {
+                self.pending_undo = Some(ClientMsg::UndoLastFileOp { pane_id: *pane_id });
+            }
+            _ => {}
+        }
         if let Ok(bytes) = postcard::to_allocvec(&msg) {
             self.ws_tx.send(WsMessage::Binary(bytes));
         }
@@ -304,6 +355,7 @@ impl KaageApp {
         {
             return;
         }
+        self.wm.active_workspace = 2; // "3: Files"
         let left_id = self.next_tracker_pane_id;
         let right_id = left_id + 1;
         self.next_tracker_pane_id += 2;
@@ -314,7 +366,9 @@ impl KaageApp {
             self.send_client_msg(msg);
         }
 
-        self.wm.open_window(
+        self.wm.open_window_in_workspace(
+            2,
+            false,
             "Tracker — Files".into(),
             PaneKind::FileTracker(Box::new(tracker)),
             self.stage_origin(16.0, 16.0),
@@ -342,6 +396,11 @@ impl KaageApp {
         );
     }
 
+    fn toggle_theme(&mut self, ctx: &egui::Context) {
+        self.theme_mode = current_theme_mode().toggle();
+        apply_theme(ctx, self.theme_mode);
+    }
+
     fn push_history(buf: &mut Vec<f32>, val: f32) {
         if buf.len() >= MAX_HISTORY_SAMPLES {
             buf.remove(0);
@@ -354,7 +413,14 @@ impl eframe::App for KaageApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
         let now = ctx.input(|i| i.time);
+        let p = active_palette();
         ctx.request_repaint_after(std::time::Duration::from_secs(1));
+
+        // Global Ctrl+K / Cmd+K Command Palette shortcut
+        let cmd_k = ctx.input(|i| (i.modifiers.ctrl || i.modifiers.mac_cmd) && i.key_pressed(Key::K));
+        if cmd_k {
+            self.cmd_palette.toggle();
+        }
 
         while let Some(event) = self.ws_rx.try_recv() {
             match event {
@@ -371,6 +437,7 @@ impl eframe::App for KaageApp {
                         ok: false,
                         text: format!("WebSocket error: {err}"),
                         expires_at: now + 6.0,
+                        undo_msg: None,
                     });
                 }
                 WsEvent::Message(WsMessage::Binary(bytes)) => {
@@ -380,7 +447,8 @@ impl eframe::App for KaageApp {
                             ServerMsg::Metrics(m) => {
                                 Self::push_history(&mut self.cpu_history, m.cpu_percent);
                                 if m.mem_total_mb > 0 {
-                                    let pct = (m.mem_used_mb as f32 / m.mem_total_mb as f32) * 100.0;
+                                    let pct =
+                                        (m.mem_used_mb as f32 / m.mem_total_mb as f32) * 100.0;
                                     Self::push_history(&mut self.mem_history, pct);
                                 }
                                 self.metrics = Some(m);
@@ -442,10 +510,12 @@ impl eframe::App for KaageApp {
                                 ok,
                                 message,
                             } => {
+                                let undo_msg = if ok { self.pending_undo.take() } else { None };
                                 self.toast = Some(ToastNotice {
                                     ok,
                                     text: format!("{target}: {message}"),
-                                    expires_at: now + 4.5,
+                                    expires_at: now + 5.5,
+                                    undo_msg,
                                 });
                             }
                             ServerMsg::DirSnapshot(listing) => {
@@ -487,12 +557,14 @@ impl eframe::App for KaageApp {
             }
         }
 
-        // Desktop Canvas + kaage Wallpaper
+        // Desktop Canvas: Obsidian Dot-Grid + optional kaage Wallpaper
         egui::CentralPanel::default()
-            .frame(egui::Frame::NONE.fill(BEOS_DESKTOP_BLUE))
+            .frame(egui::Frame::NONE.fill(p.canvas_bg))
             .show(ui, |ui| {
-                if let Some(tex) = &self.wallpaper {
-                    let rect = ui.max_rect();
+                let rect = ui.max_rect();
+                if self.show_wallpaper
+                    && let Some(tex) = &self.wallpaper
+                {
                     let tex_size = tex.size_vec2();
                     if rect.width() > 0.0
                         && rect.height() > 0.0
@@ -512,13 +584,23 @@ impl eframe::App for KaageApp {
                             let x_min = (1.0 - w) * 0.72;
                             Rect::from_min_max(Pos2::new(x_min, 0.0), Pos2::new(x_min + w, 1.0))
                         };
-                        ui.painter().image(tex.id(), rect, uv, Color32::WHITE);
+                        let tint = if p.is_dark {
+                            Color32::from_rgba_unmultiplied(150, 165, 190, 165)
+                        } else {
+                            Color32::WHITE
+                        };
+                        ui.painter().image(tex.id(), rect, uv, tint);
                     }
+                }
+                if p.is_dark {
+                    draw_dot_grid(ui.painter(), rect);
                 }
             });
 
-        // Classic BeOS Desktop Icons (right edge)
-        if let Some(icon_act) = show_desktop_icons(&ctx) {
+        // Desktop Shortcut Icons (right edge, wide screens only)
+        if ctx.content_rect().width() >= 1120.0
+            && let Some(icon_act) = show_desktop_icons(&ctx)
+        {
             match icon_act {
                 DesktopIconAction::OpenFileTracker => self.open_file_tracker(),
                 DesktopIconAction::OpenVitals => self.open_vitals(),
@@ -541,66 +623,70 @@ impl eframe::App for KaageApp {
             }
         }
 
-        // Left Floating Window: BeOS Tracker Sidebar
-        if let Some(tracker_act) = self.tracker.show(
-            &ctx,
-            self.nixos.as_ref(),
-            self.metrics.as_ref(),
-            &self.units,
-            &self.containers,
-            self.dashboard.as_ref(),
-            &self.wm.groups,
-        ) {
-            match tracker_act {
-                TrackerAction::Hide => {
-                    self.tracker.visible = false;
-                }
-                TrackerAction::NewTerminal => {
-                    self.spawn_terminal_window("Terminal — shell".into(), None);
-                }
-                TrackerAction::OpenServices { scope, state } => {
-                    self.wm
-                        .open_or_focus_systemd(scope, state, self.tracker.width());
-                    self.send_client_msg(ClientMsg::ListUnits);
-                }
-                TrackerAction::OpenContainers => self.open_containers_window(),
-                TrackerAction::OpenSystemMonitor => self.open_system_monitor(),
-                TrackerAction::OpenVitals => self.open_vitals(),
-                TrackerAction::OpenBottom => self.open_bottom(),
-                TrackerAction::OpenAiJobs => self.open_ai_jobs(),
-                TrackerAction::OpenHttpPorts => self.open_http_ports(),
-                TrackerAction::OpenTailscale => self.open_tailscale(),
-                TrackerAction::OpenFileTracker => self.open_file_tracker(),
-                TrackerAction::OpenJournal { user } => {
-                    let (title, cmd) = if user {
-                        (
-                            "journal — user".into(),
-                            vec![
-                                "journalctl".into(),
-                                "--user".into(),
-                                "-n".into(),
-                                "100".into(),
-                                "-f".into(),
-                            ],
-                        )
-                    } else {
-                        (
-                            "journal — system".into(),
-                            vec!["journalctl".into(), "-n".into(), "100".into(), "-f".into()],
-                        )
-                    };
-                    self.spawn_terminal_window(title, Some(cmd));
-                }
-                TrackerAction::FocusWindow { group_id, tab_idx } => {
-                    self.wm.focus_tab(group_id, tab_idx);
+        // Left Host Sidebar (auto-hidden on narrow mobile viewports)
+        let sidebar_width = if ctx.content_rect().width() < 768.0 {
+            0.0
+        } else {
+            if let Some(tracker_act) = self.tracker.show(
+                &ctx,
+                self.nixos.as_ref(),
+                self.metrics.as_ref(),
+                &self.units,
+                &self.containers,
+                self.dashboard.as_ref(),
+                &self.wm.groups,
+            ) {
+                match tracker_act {
+                    TrackerAction::Hide => self.tracker.visible = false,
+                    TrackerAction::NewTerminal => {
+                        self.spawn_terminal_window("Terminal — shell".into(), None);
+                    }
+                    TrackerAction::OpenServices { scope, state } => {
+                        self.wm
+                            .open_or_focus_systemd(scope, state, self.tracker.width());
+                        self.send_client_msg(ClientMsg::ListUnits);
+                    }
+                    TrackerAction::OpenContainers => self.open_containers_window(),
+                    TrackerAction::OpenSystemMonitor => self.open_system_monitor(),
+                    TrackerAction::OpenVitals => self.open_vitals(),
+                    TrackerAction::OpenBottom => self.open_bottom(),
+                    TrackerAction::OpenAiJobs => self.open_ai_jobs(),
+                    TrackerAction::OpenHttpPorts => self.open_http_ports(),
+                    TrackerAction::OpenTailscale => self.open_tailscale(),
+                    TrackerAction::OpenFileTracker => self.open_file_tracker(),
+                    TrackerAction::OpenJournal { user } => {
+                        let (title, cmd) = if user {
+                            (
+                                "journal — user".into(),
+                                vec![
+                                    "journalctl".into(),
+                                    "--user".into(),
+                                    "-n".into(),
+                                    "100".into(),
+                                    "-f".into(),
+                                ],
+                            )
+                        } else {
+                            (
+                                "journal — system".into(),
+                                vec!["journalctl".into(), "-n".into(), "100".into(), "-f".into()],
+                            )
+                        };
+                        self.spawn_terminal_window(title, Some(cmd));
+                    }
+                    TrackerAction::FocusWindow { group_id, tab_idx } => {
+                        self.wm.focus_tab(group_id, tab_idx);
+                    }
                 }
             }
-        }
+            self.tracker.width()
+        };
 
-        // Floating BeOS Windows
+        // Hybrid BSP Tiling + Pinned PiP Windows
         let mut outbound = Vec::new();
         let spawn_reqs = self.wm.show(
             &ctx,
+            sidebar_width,
             self.nixos.as_ref(),
             &self.units,
             &mut self.selected_unit_status,
@@ -615,7 +701,6 @@ impl eframe::App for KaageApp {
         for msg in outbound {
             self.send_client_msg(msg);
         }
-
         for req in spawn_reqs {
             match req {
                 InspectorSpawnRequest::OpenCommandTab { title, cmd } => {
@@ -624,52 +709,102 @@ impl eframe::App for KaageApp {
             }
         }
 
-        // Full-Width Classic BeOS Topbar / Deskbar
+        // Waybar-style 28px Mission-Control Top Status Strip
         if let Some(action) = self.deskbar.show(
             &ctx,
             self.nixos.as_ref(),
             self.metrics.as_ref(),
             self.latest_vital.as_ref(),
+            self.dashboard.as_ref(),
             &self.units,
             self.connected,
             self.tracker.visible,
-            &self.wm.groups,
+            self.wm.active_workspace,
         ) {
             match action {
-                DeskbarAction::ToggleTracker => {
-                    self.tracker.visible = !self.tracker.visible;
-                }
-                DeskbarAction::TileWindows => {
-                    let screen = ctx.content_rect();
-                    self.wm.tile_windows(screen, self.tracker.width());
-                }
-                DeskbarAction::NewTerminal => {
-                    self.spawn_terminal_window("Terminal — shell".into(), None);
-                }
+                DeskbarAction::OpenPalette => self.cmd_palette.toggle(),
+                DeskbarAction::ToggleTracker => self.tracker.visible = !self.tracker.visible,
+                DeskbarAction::ToggleTheme => self.toggle_theme(&ctx),
+                DeskbarAction::SwitchWorkspace(ws) => self.wm.active_workspace = ws,
                 DeskbarAction::OpenSystemdInspector { scope, state } => {
                     self.wm
                         .open_or_focus_systemd(scope, state, self.tracker.width());
                     self.send_client_msg(ClientMsg::ListUnits);
                 }
-                DeskbarAction::OpenDockerInspector => self.open_containers_window(),
-                DeskbarAction::OpenSystemMonitor => self.open_system_monitor(),
                 DeskbarAction::OpenVitals => self.open_vitals(),
-                DeskbarAction::OpenBottom => self.open_bottom(),
-                DeskbarAction::OpenAiJobs => self.open_ai_jobs(),
                 DeskbarAction::OpenHttpPorts => self.open_http_ports(),
                 DeskbarAction::OpenTailscale => self.open_tailscale(),
-                DeskbarAction::OpenFileTracker => self.open_file_tracker(),
-                DeskbarAction::FocusWindow { group_id, tab_idx } => {
-                    self.wm.focus_tab(group_id, tab_idx);
+            }
+        }
+
+        // Global Command Palette (Ctrl+K / Cmd+K)
+        if let Some(act) = self.cmd_palette.show(&ctx, &self.units, &self.containers) {
+            match act {
+                PaletteAction::SwitchWorkspace(ws) => self.wm.active_workspace = ws,
+                PaletteAction::OpenVitals => self.open_vitals(),
+                PaletteAction::OpenFileTracker => self.open_file_tracker(),
+                PaletteAction::OpenSystemd { scope, state } => {
+                    self.wm
+                        .open_or_focus_systemd(scope, state, self.tracker.width());
+                    self.send_client_msg(ClientMsg::ListUnits);
+                }
+                PaletteAction::OpenSystemMonitor => self.open_system_monitor(),
+                PaletteAction::OpenBottom => self.open_bottom(),
+                PaletteAction::OpenAiJobs => self.open_ai_jobs(),
+                PaletteAction::OpenHttpPorts => self.open_http_ports(),
+                PaletteAction::OpenTailscale => self.open_tailscale(),
+                PaletteAction::OpenContainers => self.open_containers_window(),
+                PaletteAction::NewTerminal => {
+                    self.spawn_terminal_window("Terminal — shell".into(), None);
+                }
+                PaletteAction::ToggleTheme => self.toggle_theme(&ctx),
+                PaletteAction::ToggleWallpaper => self.show_wallpaper = !self.show_wallpaper,
+                PaletteAction::ToggleSidebar => self.tracker.visible = !self.tracker.visible,
+                PaletteAction::TogglePinActive => self.wm.toggle_pin_active(),
+                PaletteAction::ControlUnit {
+                    unit,
+                    scope,
+                    action,
+                } => {
+                    self.send_client_msg(ClientMsg::ControlUnit {
+                        unit,
+                        scope,
+                        action,
+                    });
+                }
+                PaletteAction::UnitLogs { unit, scope } => {
+                    let mut cmd = vec!["journalctl".into()];
+                    if scope == kaage_proto::UnitScope::User {
+                        cmd.push("--user".into());
+                    }
+                    cmd.extend(["-u".into(), unit.clone(), "-n".into(), "100".into(), "-f".into()]);
+                    self.spawn_terminal_window(format!("logs: {unit}"), Some(cmd));
+                }
+                PaletteAction::ControlContainer { id, action } => {
+                    self.send_client_msg(ClientMsg::ControlContainer { id, action });
+                }
+                PaletteAction::ContainerShell { name, id } => {
+                    self.spawn_terminal_window(
+                        format!("sh: {name}"),
+                        Some(vec![
+                            "docker".into(),
+                            "exec".into(),
+                            "-it".into(),
+                            id,
+                            "/bin/sh".into(),
+                        ]),
+                    );
                 }
             }
         }
 
-        // Action Toast Notice (bottom-right)
+        // Interactive Toast Notice with Undo Button (bottom-right)
+        let mut trigger_undo: Option<ClientMsg> = None;
         if let Some(toast) = &self.toast {
             if now < toast.expires_at {
                 let screen = ctx.content_rect();
-                let toast_size = Vec2::new(340.0, 28.0);
+                let toast_w: f32 = if toast.undo_msg.is_some() { 400.0 } else { 340.0 };
+                let toast_size = Vec2::new(toast_w.min(screen.width() - 24.0), 30.0);
                 let toast_pos = Pos2::new(
                     (screen.max.x - toast_size.x - 12.0).max(12.0),
                     (screen.max.y - toast_size.y - 12.0).max(12.0),
@@ -680,17 +815,17 @@ impl eframe::App for KaageApp {
                     .show(&ctx, |ui| {
                         let rect = Rect::from_min_size(toast_pos, toast_size);
                         let painter = ui.painter();
-                        painter.rect_filled(rect, CornerRadius::ZERO, BEOS_PANEL_GRAY);
+                        painter.rect_filled(rect, CornerRadius::ZERO, p.surface);
                         draw_beos_bevel(painter, rect, false);
                         let accent = if toast.ok {
-                            BEOS_STATUS_GREEN
+                            p.status_green
                         } else {
-                            BEOS_STATUS_RED
+                            p.status_red
                         };
                         painter.rect_filled(
                             Rect::from_min_size(
                                 Pos2::new(rect.min.x + 2.0, rect.min.y + 2.0),
-                                Vec2::new(5.0, rect.height() - 4.0),
+                                Vec2::new(4.0, rect.height() - 4.0),
                             ),
                             CornerRadius::ZERO,
                             accent,
@@ -700,12 +835,48 @@ impl eframe::App for KaageApp {
                             egui::Align2::LEFT_CENTER,
                             &toast.text,
                             egui::FontId::proportional(12.0),
-                            Color32::BLACK,
+                            p.text,
                         );
+                        if let Some(ref undo_action) = toast.undo_msg {
+                            let undo_rect = Rect::from_min_size(
+                                Pos2::new(rect.max.x - 56.0, rect.min.y + 4.0),
+                                Vec2::new(50.0, rect.height() - 8.0),
+                            );
+                            let resp = ui.interact(
+                                undo_rect,
+                                Id::unique("kaage_toast_undo"),
+                                egui::Sense::click(),
+                            );
+                            painter.rect_filled(
+                                undo_rect,
+                                CornerRadius::ZERO,
+                                if resp.hovered() { p.widget_hover } else { p.widget },
+                            );
+                            painter.rect_stroke(
+                                undo_rect,
+                                CornerRadius::ZERO,
+                                Stroke::new(1.0, p.accent),
+                                egui::StrokeKind::Inside,
+                            );
+                            painter.text(
+                                undo_rect.center(),
+                                egui::Align2::CENTER_CENTER,
+                                "Undo",
+                                egui::FontId::monospace(10.5),
+                                p.accent,
+                            );
+                            if resp.clicked() {
+                                trigger_undo = Some(undo_action.clone());
+                            }
+                        }
                     });
             } else {
                 self.toast = None;
             }
+        }
+        if let Some(undo_msg) = trigger_undo {
+            self.toast = None;
+            self.send_client_msg(undo_msg);
         }
     }
 }
