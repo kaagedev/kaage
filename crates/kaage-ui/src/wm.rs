@@ -1,3 +1,4 @@
+use crate::file_tracker::{TrackerSpawnRequest, TrackerWindow};
 use crate::inspectors::{
     InspectorSpawnRequest, ScopeFilter, StateFilter, render_docker_inspector,
     render_systemd_inspector,
@@ -30,6 +31,7 @@ pub enum PaneKind {
         filter: String,
     },
     TailscalePanel,
+    FileTracker(Box<TrackerWindow>),
 }
 
 pub struct BeTab {
@@ -425,6 +427,42 @@ impl BeWindowManager {
                                 }
                                 PaneKind::TailscalePanel => {
                                     render_tailscale_panel(&mut child_ui, dashboard, send_msg);
+                                }
+                                PaneKind::FileTracker(tracker) => {
+                                    if let Some(req) = tracker.ui(&mut child_ui, send_msg) {
+                                        match req {
+                                            TrackerSpawnRequest::OpenTerminalInDir { title, dir } => {
+                                                let safe_dir = dir.replace('\'', "'\\''");
+                                                spawn_requests.push(
+                                                    InspectorSpawnRequest::OpenCommandTab {
+                                                        title,
+                                                        cmd: vec![
+                                                            "sh".into(),
+                                                            "-c".into(),
+                                                            format!(
+                                                                "cd '{safe_dir}' && exec \"${{SHELL:-/bin/sh}}\""
+                                                            ),
+                                                        ],
+                                                    },
+                                                );
+                                            }
+                                            TrackerSpawnRequest::OpenUnitLogs { unit } => {
+                                                spawn_requests.push(
+                                                    InspectorSpawnRequest::OpenCommandTab {
+                                                        title: format!("logs: {unit}"),
+                                                        cmd: vec![
+                                                            "journalctl".into(),
+                                                            "-u".into(),
+                                                            unit,
+                                                            "-n".into(),
+                                                            "100".into(),
+                                                            "-f".into(),
+                                                        ],
+                                                    },
+                                                );
+                                            }
+                                        }
+                                    }
                                 }
                             }
                         }

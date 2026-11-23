@@ -1,6 +1,7 @@
 mod clock;
 mod deskbar;
 mod desktop_icons;
+mod file_tracker;
 mod inspectors;
 mod panels;
 mod terminal;
@@ -12,6 +13,7 @@ use deskbar::{BeDeskbar, DeskbarAction};
 use desktop_icons::{DesktopIconAction, show_desktop_icons};
 use eframe::egui::{self, Color32, CornerRadius, Id, Pos2, Rect, Vec2};
 use ewebsock::{WsEvent, WsMessage, WsReceiver, WsSender};
+use file_tracker::TrackerWindow;
 use inspectors::{InspectorSpawnRequest, ScopeFilter, StateFilter};
 use kaage_proto::{
     ClientMsg, ContainerInfo, DashboardSnapshot, HostMetrics, NixosInfo, ServerMsg,
@@ -51,6 +53,7 @@ struct KaageApp {
     selected_unit_status: Option<SystemdUnitStatus>,
     containers: Vec<ContainerInfo>,
     next_pty_id: u32,
+    next_tracker_pane_id: u64,
     toast: Option<ToastNotice>,
 }
 
@@ -130,6 +133,7 @@ impl KaageApp {
             selected_unit_status: None,
             containers: Vec::new(),
             next_pty_id: 2,
+            next_tracker_pane_id: 1,
             toast: None,
         }
     }
@@ -289,6 +293,31 @@ impl KaageApp {
         self.send_client_msg(ClientMsg::RefreshDashboard);
     }
 
+    fn open_file_tracker(&mut self) {
+        if self
+            .wm
+            .focus_matching_tab(|k| matches!(k, PaneKind::FileTracker(_)))
+        {
+            return;
+        }
+        let left_id = self.next_tracker_pane_id;
+        let right_id = left_id + 1;
+        self.next_tracker_pane_id += 2;
+
+        let mut pending = Vec::new();
+        let tracker = TrackerWindow::new(left_id, right_id, &mut |msg| pending.push(msg));
+        for msg in pending {
+            self.send_client_msg(msg);
+        }
+
+        self.wm.open_window(
+            "Tracker — Files".into(),
+            PaneKind::FileTracker(Box::new(tracker)),
+            self.stage_origin(16.0, 16.0),
+            Vec2::new(920.0, 560.0),
+        );
+    }
+
     fn push_history(buf: &mut Vec<f32>, val: f32) {
         if buf.len() >= MAX_HISTORY_SAMPLES {
             buf.remove(0);
@@ -371,6 +400,38 @@ impl eframe::App for KaageApp {
                                     expires_at: now + 4.5,
                                 });
                             }
+                            ServerMsg::DirSnapshot(listing) => {
+                                for group in &mut self.wm.groups {
+                                    for tab in &mut group.tabs {
+                                        if let PaneKind::FileTracker(tracker) = &mut tab.kind {
+                                            tracker.on_dir_snapshot(listing.clone());
+                                        }
+                                    }
+                                }
+                            }
+                            ServerMsg::FilePreview {
+                                pane_id: _,
+                                path,
+                                preview,
+                            } => {
+                                for group in &mut self.wm.groups {
+                                    for tab in &mut group.tabs {
+                                        if let PaneKind::FileTracker(tracker) = &mut tab.kind {
+                                            tracker.on_preview(&ctx, path.clone(), preview.clone());
+                                        }
+                                    }
+                                }
+                            }
+                            ServerMsg::WorkspacesSnapshot(list) => {
+                                for group in &mut self.wm.groups {
+                                    for tab in &mut group.tabs {
+                                        if let PaneKind::FileTracker(tracker) = &mut tab.kind {
+                                            tracker.workspaces = list.clone();
+                                        }
+                                    }
+                                }
+                            }
+                            ServerMsg::SearchResults { .. } => {}
                         }
                     }
                 }
@@ -411,6 +472,7 @@ impl eframe::App for KaageApp {
         // Classic BeOS Desktop Icons (right edge)
         if let Some(icon_act) = show_desktop_icons(&ctx) {
             match icon_act {
+                DesktopIconAction::OpenFileTracker => self.open_file_tracker(),
                 DesktopIconAction::OpenHostServices => {
                     self.wm.open_or_focus_systemd(
                         ScopeFilter::All,
@@ -458,6 +520,7 @@ impl eframe::App for KaageApp {
                 TrackerAction::OpenAiJobs => self.open_ai_jobs(),
                 TrackerAction::OpenHttpPorts => self.open_http_ports(),
                 TrackerAction::OpenTailscale => self.open_tailscale(),
+                TrackerAction::OpenFileTracker => self.open_file_tracker(),
                 TrackerAction::OpenJournal { user } => {
                     let (title, cmd) = if user {
                         (
@@ -543,6 +606,7 @@ impl eframe::App for KaageApp {
                 DeskbarAction::OpenAiJobs => self.open_ai_jobs(),
                 DeskbarAction::OpenHttpPorts => self.open_http_ports(),
                 DeskbarAction::OpenTailscale => self.open_tailscale(),
+                DeskbarAction::OpenFileTracker => self.open_file_tracker(),
                 DeskbarAction::FocusWindow { group_id, tab_idx } => {
                     self.wm.focus_tab(group_id, tab_idx);
                 }

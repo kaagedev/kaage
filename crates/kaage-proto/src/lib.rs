@@ -194,6 +194,115 @@ pub struct DashboardSnapshot {
     pub tailscale: TailscaleInfo,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum FileKind {
+    Directory,
+    Document,
+    Markdown,
+    Image,
+    Video,
+    Audio,
+    Archive,
+    ModelWeights, // .safetensors, .gguf, .ckpt, .onnx
+    Code,
+    Installer, // .deb, .rpm, .AppImage, .nix
+    Other,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FileEntry {
+    pub name: String,
+    pub path: String,
+    pub kind: FileKind,
+    pub size: u64,
+    pub modified_ts: i64,
+    pub mode: u32,
+    pub is_symlink: bool,
+    pub symlink_target: Option<String>,
+    pub symlink_broken: bool,
+    /// e.g. Some("comfyui.service") if a systemd unit or process holds an open fd
+    pub held_by_unit: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GitDirStatus {
+    pub branch: String,
+    pub dirty_count: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DirListing {
+    pub pane_id: u64,
+    pub path: String,
+    pub git: Option<GitDirStatus>,
+    pub disk_free_bytes: u64,
+    pub disk_total_bytes: u64,
+    pub entries: Vec<FileEntry>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkspaceDef {
+    pub name: String,
+    pub items: Vec<WorkspaceItem>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkspaceItem {
+    pub label: String,
+    pub path: String,
+    pub kind: FileKind,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PreviewContent {
+    Text {
+        content: String,
+        is_markdown: bool,
+        truncated: bool,
+    },
+    ArchiveEntries {
+        entries: Vec<(String, u64)>,
+    },
+    ModelHeader {
+        format: String,
+        metadata: Vec<(String, String)>,
+    },
+    ImageBytes {
+        mime: String,
+        bytes: Vec<u8>,
+    },
+    Unsupported {
+        reason: String,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum FileOp {
+    Copy {
+        sources: Vec<String>,
+        dest_dir: String,
+    },
+    Move {
+        sources: Vec<String>,
+        dest_dir: String,
+    },
+    Rename {
+        path: String,
+        new_name: String,
+    },
+    Trash {
+        paths: Vec<String>,
+    },
+    Mkdir {
+        parent: String,
+        name: String,
+    },
+    WriteText {
+        path: String,
+        content: String,
+    },
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ClientMsg {
     ListUnits,
@@ -230,6 +339,29 @@ pub enum ClientMsg {
     ClosePty {
         session_id: u32,
     },
+    ListDir {
+        pane_id: u64,
+        path: String,
+    },
+    PerformFileOp {
+        pane_id: u64,
+        op: FileOp,
+    },
+    UndoLastFileOp {
+        pane_id: u64,
+    },
+    PreviewFile {
+        pane_id: u64,
+        path: String,
+    },
+    SearchFiles {
+        query_id: u64,
+        root: String,
+        pattern: String,
+        search_contents: bool,
+    },
+    ListWorkspaces,
+    SaveWorkspace(WorkspaceDef),
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -252,6 +384,18 @@ pub enum ServerMsg {
     PtyExited {
         session_id: u32,
     },
+    DirSnapshot(DirListing),
+    FilePreview {
+        pane_id: u64,
+        path: String,
+        preview: PreviewContent,
+    },
+    SearchResults {
+        query_id: u64,
+        matches: Vec<FileEntry>,
+        done: bool,
+    },
+    WorkspacesSnapshot(Vec<WorkspaceDef>),
 }
 
 #[cfg(test)]

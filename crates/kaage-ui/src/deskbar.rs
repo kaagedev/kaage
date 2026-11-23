@@ -28,6 +28,7 @@ pub enum DeskbarAction {
     OpenAiJobs,
     OpenHttpPorts,
     OpenTailscale,
+    OpenFileTracker,
     FocusWindow {
         group_id: u64,
         tab_idx: usize,
@@ -342,6 +343,7 @@ impl BeDeskbar {
                             PaneKind::AiJobs => "AI",
                             PaneKind::HttpPorts { .. } => "NET",
                             PaneKind::TailscalePanel => "TS",
+                            PaneKind::FileTracker(_) => "TRK",
                         };
                         let short_title: String = tab.title.chars().take(18).collect();
                         let label = format!("[{badge}] {short_title}");
@@ -387,6 +389,7 @@ impl BeDeskbar {
                 if self.menu_open {
                     let menu_pos = Pos2::new(bar_rect.min.x + 6.0, bar_rect.max.y);
                     let menu_items: Vec<(&str, &str, DeskbarAction)> = vec![
+                        ("Tracker (Files)", "TRK", DeskbarAction::OpenFileTracker),
                         ("New Terminal", ">_", DeskbarAction::NewTerminal),
                         (
                             "Systemd Services",

@@ -4,6 +4,7 @@ use crate::theme::{
 use egui::{Color32, CornerRadius, Id, Pos2, Rect, Sense, Stroke, Vec2};
 
 pub enum DesktopIconAction {
+    OpenFileTracker,
     OpenHostServices,
     OpenSystemMonitor,
     OpenBottom,
@@ -29,7 +30,8 @@ pub fn show_desktop_icons(ctx: &egui::Context) -> Option<DesktopIconAction> {
         .order(egui::Order::Background)
         .show(ctx, |ui| {
             let items = [
-                ("Services", IconKind::Folder, DesktopIconAction::OpenHostServices),
+                ("Tracker", IconKind::Folder, DesktopIconAction::OpenFileTracker),
+                ("Services", IconKind::Disk, DesktopIconAction::OpenHostServices),
                 ("Monitor", IconKind::Disk, DesktopIconAction::OpenSystemMonitor),
                 ("Bottom", IconKind::Terminal, DesktopIconAction::OpenBottom),
                 ("AI Jobs", IconKind::Container, DesktopIconAction::OpenAiJobs),

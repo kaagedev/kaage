@@ -1,3 +1,4 @@
+mod files;
 mod nixos;
 mod telemetry;
 
@@ -98,6 +99,7 @@ fn build_router(state: Arc<AppState>) -> Router {
         .route("/api/v1/units/{unit}/status", get(http_unit_status))
         .route("/api/v1/units/{unit}/{action}", post(http_control_unit))
         .route("/api/v1/containers", get(http_list_containers))
+        .route("/api/v1/files/download", get(files::http_download_file))
         .fallback_service(ServeDir::new(dist_dir))
         .with_state(state)
 }
@@ -574,6 +576,7 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
     });
 
     let ptys: Arc<Mutex<HashMap<u32, PtySession>>> = Arc::new(Mutex::new(HashMap::new()));
+    let mut undo_stack: Vec<files::UndoRecord> = Vec::new();
 
     while let Some(Ok(msg)) = ws_rx.next().await {
         let Message::Binary(bytes) = msg else {
@@ -768,6 +771,148 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
             }
             ClientMsg::ClosePty { session_id } => {
                 ptys.lock().unwrap().remove(&session_id);
+            }
+            ClientMsg::ListDir { pane_id, path } => {
+                let tx = out_tx.clone();
+                tokio::task::spawn_blocking(move || match files::read_dir_listing(pane_id, &path) {
+                    Ok(listing) => {
+                        let _ = tx.send(ServerMsg::DirSnapshot(listing));
+                    }
+                    Err(err) => {
+                        let _ = tx.send(ServerMsg::ActionFeedback {
+                            target: path,
+                            ok: false,
+                            message: err,
+                        });
+                    }
+                });
+            }
+            ClientMsg::PerformFileOp { pane_id, op } => {
+                let op_result = tokio::task::spawn_blocking(move || files::execute_file_op(op))
+                    .await
+                    .unwrap_or_else(|e| Err(e.to_string()));
+                match op_result {
+                    Ok((message, refresh_dir, undo)) => {
+                        undo_stack.push(undo);
+                        let _ = out_tx.send(ServerMsg::ActionFeedback {
+                            target: "Tracker".into(),
+                            ok: true,
+                            message,
+                        });
+                        if let Some(dir) = refresh_dir {
+                            let tx = out_tx.clone();
+                            let dir_str = dir.display().to_string();
+                            tokio::task::spawn_blocking(move || {
+                                if let Ok(listing) = files::read_dir_listing(pane_id, &dir_str) {
+                                    let _ = tx.send(ServerMsg::DirSnapshot(listing));
+                                }
+                            });
+                        }
+                    }
+                    Err(err) => {
+                        let _ = out_tx.send(ServerMsg::ActionFeedback {
+                            target: "Tracker".into(),
+                            ok: false,
+                            message: err,
+                        });
+                    }
+                }
+            }
+            ClientMsg::UndoLastFileOp { pane_id } => {
+                if let Some(record) = undo_stack.pop() {
+                    let res = tokio::task::spawn_blocking(move || files::undo_file_op(record))
+                        .await
+                        .unwrap_or_else(|e| Err(e.to_string()));
+                    match res {
+                        Ok((message, refresh_dir)) => {
+                            let _ = out_tx.send(ServerMsg::ActionFeedback {
+                                target: "Undo".into(),
+                                ok: true,
+                                message,
+                            });
+                            if let Some(dir) = refresh_dir {
+                                let tx = out_tx.clone();
+                                let dir_str = dir.display().to_string();
+                                tokio::task::spawn_blocking(move || {
+                                    if let Ok(listing) = files::read_dir_listing(pane_id, &dir_str)
+                                    {
+                                        let _ = tx.send(ServerMsg::DirSnapshot(listing));
+                                    }
+                                });
+                            }
+                        }
+                        Err(err) => {
+                            let _ = out_tx.send(ServerMsg::ActionFeedback {
+                                target: "Undo".into(),
+                                ok: false,
+                                message: err,
+                            });
+                        }
+                    }
+                } else {
+                    let _ = out_tx.send(ServerMsg::ActionFeedback {
+                        target: "Undo".into(),
+                        ok: false,
+                        message: "Nothing to undo".into(),
+                    });
+                }
+            }
+            ClientMsg::PreviewFile { pane_id, path } => {
+                let tx = out_tx.clone();
+                tokio::task::spawn_blocking(move || {
+                    let preview = files::build_preview(&path);
+                    let _ = tx.send(ServerMsg::FilePreview {
+                        pane_id,
+                        path,
+                        preview,
+                    });
+                });
+            }
+            ClientMsg::SearchFiles {
+                query_id,
+                root,
+                pattern,
+                search_contents,
+            } => {
+                let tx = out_tx.clone();
+                tokio::task::spawn_blocking(move || {
+                    let matches = files::search_files(&root, &pattern, search_contents);
+                    let _ = tx.send(ServerMsg::SearchResults {
+                        query_id,
+                        matches,
+                        done: true,
+                    });
+                });
+            }
+            ClientMsg::ListWorkspaces => {
+                let tx = out_tx.clone();
+                tokio::task::spawn_blocking(move || {
+                    let list = files::load_workspaces();
+                    let _ = tx.send(ServerMsg::WorkspacesSnapshot(list));
+                });
+            }
+            ClientMsg::SaveWorkspace(ws) => {
+                let tx = out_tx.clone();
+                tokio::task::spawn_blocking(move || {
+                    let name = ws.name.clone();
+                    match files::save_workspace(&ws) {
+                        Ok(()) => {
+                            let _ = tx.send(ServerMsg::ActionFeedback {
+                                target: name,
+                                ok: true,
+                                message: "Workspace saved".into(),
+                            });
+                            let _ = tx.send(ServerMsg::WorkspacesSnapshot(files::load_workspaces()));
+                        }
+                        Err(err) => {
+                            let _ = tx.send(ServerMsg::ActionFeedback {
+                                target: name,
+                                ok: false,
+                                message: err,
+                            });
+                        }
+                    }
+                });
             }
         }
     }

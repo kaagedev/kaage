@@ -27,6 +27,7 @@ pub enum TrackerAction {
     OpenAiJobs,
     OpenHttpPorts,
     OpenTailscale,
+    OpenFileTracker,
     OpenJournal {
         user: bool,
     },
@@ -292,6 +293,9 @@ impl BeTrackerSidebar {
                         }
 
                         section_head(ui, "QUICK LAUNCH");
+                        if tracker_row(ui, "Tracker (Files)", None, false) {
+                            action = Some(TrackerAction::OpenFileTracker);
+                        }
                         if tracker_row(ui, ">_  New Shell", None, false) {
                             action = Some(TrackerAction::NewTerminal);
                         }
@@ -313,6 +317,7 @@ impl BeTrackerSidebar {
                                     PaneKind::AiJobs => "AI",
                                     PaneKind::HttpPorts { .. } => "NET",
                                     PaneKind::TailscalePanel => "TS",
+                                    PaneKind::FileTracker(_) => "TRK",
                                 };
                                 let label = format!("[{badge}] {}", tab.title);
                                 if tracker_row(ui, &label, None, false) {
