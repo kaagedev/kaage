@@ -110,16 +110,16 @@ fn render_typography_tab(ui: &mut Ui) {
                 {
                     changed = true;
                 }
-                if be_button(ui, "11").clicked() {
-                    s.base_font_size = 11.0;
-                    changed = true;
-                }
                 if be_button(ui, "13").clicked() {
                     s.base_font_size = 13.0;
                     changed = true;
                 }
                 if be_button(ui, "15").clicked() {
                     s.base_font_size = 15.0;
+                    changed = true;
+                }
+                if be_button(ui, "17").clicked() {
+                    s.base_font_size = 17.0;
                     changed = true;
                 }
             });
@@ -133,16 +133,16 @@ fn render_typography_tab(ui: &mut Ui) {
                 {
                     changed = true;
                 }
-                if be_button(ui, "12").clicked() {
-                    s.terminal_font_size = 12.0;
-                    changed = true;
-                }
                 if be_button(ui, "14").clicked() {
                     s.terminal_font_size = 14.0;
                     changed = true;
                 }
                 if be_button(ui, "16").clicked() {
                     s.terminal_font_size = 16.0;
+                    changed = true;
+                }
+                if be_button(ui, "18").clicked() {
+                    s.terminal_font_size = 18.0;
                     changed = true;
                 }
             });

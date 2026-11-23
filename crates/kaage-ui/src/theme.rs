@@ -42,8 +42,8 @@ impl Default for UserSettings {
             palette: preset_palette(ThemeMode::ObsidianAmber),
             font_preset: FontPreset::IbmPlex,
             ui_scale: 1.0,
-            base_font_size: 13.0,
-            terminal_font_size: 14.0,
+            base_font_size: 15.0,
+            terminal_font_size: 16.0,
         }
     }
 }
