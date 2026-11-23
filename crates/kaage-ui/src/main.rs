@@ -2,6 +2,7 @@ mod clock;
 mod deskbar;
 mod desktop_icons;
 mod file_tracker;
+mod help;
 mod inspectors;
 mod palette;
 mod panels;
@@ -16,6 +17,7 @@ use desktop_icons::{DesktopIconAction, show_desktop_icons};
 use eframe::egui::{self, Color32, CornerRadius, Id, Key, Pos2, Rect, Stroke, Vec2};
 use ewebsock::{WsEvent, WsMessage, WsReceiver, WsSender};
 use file_tracker::TrackerWindow;
+use help::HelpWindow;
 use inspectors::{InspectorSpawnRequest, ScopeFilter, StateFilter};
 use kaage_proto::{
     ClientMsg, ContainerInfo, DashboardSnapshot, FileOp, HostMetrics, NixosInfo, ServerMsg,
@@ -369,6 +371,21 @@ impl KaageApp {
         );
     }
 
+    fn open_help(&mut self) {
+        if self
+            .wm
+            .focus_matching_tab(|k| matches!(k, PaneKind::Help(_)))
+        {
+            return;
+        }
+        self.wm.open_window(
+            "kaage-help".into(),
+            PaneKind::Help(HelpWindow::new()),
+            self.stage_origin(24.0, 20.0),
+            Vec2::new(720.0, 480.0),
+        );
+    }
+
     fn toggle_theme(&mut self, ctx: &egui::Context) {
         self.theme_mode = current_theme_mode().toggle();
         apply_theme(ctx, self.theme_mode);
@@ -625,6 +642,7 @@ impl eframe::App for KaageApp {
                     TrackerAction::OpenHttpPorts => self.open_http_ports(),
                     TrackerAction::OpenTailscale => self.open_tailscale(),
                     TrackerAction::OpenFileTracker => self.open_file_tracker(),
+                    TrackerAction::OpenHelp => self.open_help(),
                     TrackerAction::OpenJournal { user } => {
                         let (title, cmd) = if user {
                             (
@@ -705,6 +723,7 @@ impl eframe::App for KaageApp {
                 DeskbarAction::OpenVitals => self.open_vitals(),
                 DeskbarAction::OpenHttpPorts => self.open_http_ports(),
                 DeskbarAction::OpenTailscale => self.open_tailscale(),
+                DeskbarAction::OpenHelp => self.open_help(),
             }
         }
 
@@ -724,6 +743,7 @@ impl eframe::App for KaageApp {
                 PaletteAction::OpenHttpPorts => self.open_http_ports(),
                 PaletteAction::OpenTailscale => self.open_tailscale(),
                 PaletteAction::OpenContainers => self.open_containers_window(),
+                PaletteAction::OpenHelp => self.open_help(),
                 PaletteAction::NewTerminal => {
                     self.spawn_terminal_window("Terminal — shell".into(), None);
                 }

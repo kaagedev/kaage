@@ -52,6 +52,18 @@ impl TerminalPane {
         }
 
         if response.has_focus() {
+            // Lock Escape, Tab, and Arrow keys to the terminal so egui never steals focus in Vim/tmux.
+            ui.memory_mut(|m| {
+                m.set_focus_lock_filter(
+                    response.id,
+                    egui::EventFilter {
+                        tab: true,
+                        horizontal_arrows: true,
+                        vertical_arrows: true,
+                        escape: true,
+                    },
+                );
+            });
             let mut outbound = Vec::new();
             ui.input(|i| {
                 for event in &i.events {
@@ -252,6 +264,9 @@ fn ctrl_key_to_byte(key: Key) -> Option<u8> {
         Key::X => Some(24),
         Key::Y => Some(25),
         Key::Z => Some(26),
+        Key::OpenBracket => Some(27),  // Ctrl+[ == Escape (Vim-safe in Safari/Edge fullscreen)
+        Key::Backslash => Some(28),    // Ctrl+\ (SIGQUIT)
+        Key::CloseBracket => Some(29), // Ctrl+]
         _ => None,
     }
 }

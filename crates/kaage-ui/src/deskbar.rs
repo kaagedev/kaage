@@ -24,6 +24,7 @@ pub enum DeskbarAction {
     OpenVitals,
     OpenHttpPorts,
     OpenTailscale,
+    OpenHelp,
 }
 
 impl BeDeskbar {
@@ -215,6 +216,42 @@ impl BeDeskbar {
                         action = Some(DeskbarAction::ToggleTheme);
                     }
                     right_x = theme_rect.min.x - 5.0;
+                }
+
+                // 2b) "? Help" button linking to kaage-help
+                let help_w = 54.0;
+                if right_x - help_w > left_x + 20.0 {
+                    let help_rect = Rect::from_min_size(
+                        Pos2::new(right_x - help_w, btn_y),
+                        Vec2::new(help_w, btn_h),
+                    );
+                    let resp = ui
+                        .interact(help_rect, Id::unique("topbar_help"), Sense::click())
+                        .on_hover_text("Open kaage-help (Browser/Vim keys, Shortcuts & APIs)");
+                    painter.rect_filled(
+                        help_rect,
+                        CornerRadius::ZERO,
+                        if resp.hovered() { p.widget_hover } else { p.widget },
+                    );
+                    draw_beos_bevel(painter, help_rect, false);
+                    painter.text(
+                        Pos2::new(help_rect.min.x + 8.0, help_rect.center().y),
+                        egui::Align2::LEFT_CENTER,
+                        "?",
+                        egui::FontId::monospace(11.5),
+                        p.accent,
+                    );
+                    painter.text(
+                        Pos2::new(help_rect.min.x + 19.0, help_rect.center().y),
+                        egui::Align2::LEFT_CENTER,
+                        "Help",
+                        egui::FontId::proportional(11.0),
+                        p.text,
+                    );
+                    if resp.clicked() {
+                        action = Some(DeskbarAction::OpenHelp);
+                    }
+                    right_x = help_rect.min.x - 5.0;
                 }
 
                 // 3) Live 3-bar CPU / RAM / GPU Sparkbars + WS LED

@@ -25,6 +25,7 @@ pub enum TrackerAction {
     OpenHttpPorts,
     OpenTailscale,
     OpenFileTracker,
+    OpenHelp,
     OpenJournal {
         user: bool,
     },
@@ -282,6 +283,9 @@ impl BeTrackerSidebar {
                         if tracker_row(ui, "Tracker (Files)", None, false) {
                             action = Some(TrackerAction::OpenFileTracker);
                         }
+                        if tracker_row(ui, "?   kaage-help", None, false) {
+                            action = Some(TrackerAction::OpenHelp);
+                        }
                         if tracker_row(ui, ">_  New Shell", None, false) {
                             action = Some(TrackerAction::NewTerminal);
                         }
@@ -305,6 +309,7 @@ impl BeTrackerSidebar {
                                     PaneKind::TailscalePanel => "TS",
                                     PaneKind::FileTracker(_) => "TRK",
                                     PaneKind::Vitals(_) => "VIT",
+                                    PaneKind::Help(_) => "?",
                                 };
                                 let label = format!("[{badge}] {}", tab.title);
                                 if tracker_row(ui, &label, None, false) {

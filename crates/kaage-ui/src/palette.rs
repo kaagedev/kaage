@@ -13,6 +13,7 @@ pub enum PaletteAction {
     OpenHttpPorts,
     OpenTailscale,
     OpenContainers,
+    OpenHelp,
     NewTerminal,
     ToggleTheme,
     ToggleWallpaper,
@@ -287,6 +288,12 @@ fn build_items(
             category: "APP",
             shortcut: "CTR".into(),
             action: PaletteAction::OpenContainers,
+        },
+        PaletteItem {
+            label: "Open kaage-help (Vim Keys, Shortcuts & APIs)".into(),
+            category: "HELP",
+            shortcut: "?".into(),
+            action: PaletteAction::OpenHelp,
         },
         PaletteItem {
             label: "Workspace 1: Ops".into(),

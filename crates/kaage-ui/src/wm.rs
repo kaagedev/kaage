@@ -1,4 +1,5 @@
 use crate::file_tracker::{TrackerSpawnRequest, TrackerWindow};
+use crate::help::HelpWindow;
 use crate::inspectors::{
     InspectorSpawnRequest, ScopeFilter, StateFilter, render_docker_inspector,
     render_systemd_inspector,
@@ -34,6 +35,7 @@ pub enum PaneKind {
     TailscalePanel,
     FileTracker(Box<TrackerWindow>),
     Vitals(Box<VitalsWindow>),
+    Help(HelpWindow),
 }
 
 pub struct BeTab {
@@ -659,6 +661,9 @@ impl BeWindowManager {
                                             }
                                         }
                                     }
+                                }
+                                PaneKind::Help(help) => {
+                                    help.ui(&mut child_ui);
                                 }
                             }
                         }
