@@ -513,6 +513,8 @@ pub enum CopilotProvider {
     #[default]
     Gemini,
     OpenAi,
+    Claude,
+    Local,
 }
 
 impl CopilotProvider {
@@ -520,6 +522,26 @@ impl CopilotProvider {
         match self {
             Self::Gemini => "gemini",
             Self::OpenAi => "openai",
+            Self::Claude => "claude",
+            Self::Local => "local",
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Gemini => "Google Gemini",
+            Self::OpenAi => "OpenAI",
+            Self::Claude => "Anthropic Claude",
+            Self::Local => "Local (Ollama / vLLM)",
+        }
+    }
+
+    pub fn env_var_name(self) -> &'static str {
+        match self {
+            Self::Gemini => "GEMINI_API_KEY",
+            Self::OpenAi => "OPENAI_API_KEY",
+            Self::Claude => "ANTHROPIC_API_KEY",
+            Self::Local => "KAAGE_COPILOT_LOCAL_API_KEY",
         }
     }
 
@@ -527,6 +549,8 @@ impl CopilotProvider {
         match self {
             Self::Gemini => "gemini-2.5-flash",
             Self::OpenAi => "gpt-4o",
+            Self::Claude => "claude-sonnet-4-20250514",
+            Self::Local => "qwen3:30b-a3b",
         }
     }
 }
@@ -556,6 +580,8 @@ pub struct CopilotStatus {
     pub ready: bool,
     pub has_gemini_key: bool,
     pub has_openai_key: bool,
+    pub has_anthropic_key: bool,
+    pub local_endpoint: String,
     pub flake_path: String,
 }
 
@@ -679,6 +705,12 @@ pub enum ClientMsg {
         model: Option<String>,
         trust_mode: Option<TrustMode>,
         target_node: Option<String>,
+        local_endpoint: Option<String>,
+    },
+    SetCopilotApiKey {
+        provider: CopilotProvider,
+        api_key: String,
+        persist: bool,
     },
     AskCopilot {
         request_id: u64,

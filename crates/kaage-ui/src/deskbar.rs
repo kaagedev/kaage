@@ -4,7 +4,7 @@ use crate::theme::{
     BEOS_BORDER_BLACK, BEOS_LED_GOLD, BEOS_LED_GREEN, BEOS_LED_RED, BEOS_STATUS_GREEN,
     BEOS_TAB_YELLOW, TOPBAR_HEIGHT, current_theme_mode, draw_beos_bevel, palette,
 };
-use crate::wm::WORKSPACE_NAMES;
+use crate::wm::{TilingLayout, WORKSPACE_NAMES};
 use egui::{Color32, CornerRadius, Id, Pos2, Rect, Sense, Stroke, Vec2};
 use kaage_proto::{DashboardSnapshot, HostMetrics, NixosInfo, SystemdUnitInfo, VitalsTick};
 
@@ -17,13 +17,13 @@ pub enum DeskbarAction {
     ToggleTracker,
     ToggleTheme,
     SwitchWorkspace(usize),
+    SetLayout(TilingLayout),
     OpenSystemdInspector {
         scope: ScopeFilter,
         state: StateFilter,
     },
     OpenVitals,
     OpenTailscale,
-    OpenTailscaleServices,
     OpenHelp,
     OpenSettings,
     OpenCopilot,
@@ -48,6 +48,7 @@ impl BeDeskbar {
         connected: bool,
         tracker_visible: bool,
         active_workspace: usize,
+        active_layout: TilingLayout,
     ) -> Option<DeskbarAction> {
         let p = palette();
         let mut action = None;
@@ -489,46 +490,118 @@ impl BeDeskbar {
                     }
                 }
 
-                // --- MIDDLE: Active Port Badges (:8188, :8765, :8888, :9090) ---
-                if let Some(dash) = dashboard {
+                // --- MIDDLE: Predefined Layout Switcher (BSP / Cols / Rows / Grid / Focus / Float) ---
+                {
                     let mut px = left_x + 8.0;
-                    for port in dash
-                        .listening_ports
-                        .iter()
-                        .filter(|p| p.tailscale_url.is_some())
-                        .take(4)
-                    {
-                        let label = format!(":{}", port.port);
-                        let w = (label.len() as f32 * 6.4 + 10.0).max(38.0);
+                    // Subtle vertical separator between workspaces and layouts
+                    if px + 48.0 < right_x - 8.0 {
+                        painter.line_segment(
+                            [Pos2::new(px - 4.0, btn_y + 2.0), Pos2::new(px - 4.0, btn_y + btn_h - 2.0)],
+                            Stroke::new(1.0, p.border),
+                        );
+                    }
+                    for layout in TilingLayout::ALL {
+                        let label = layout.label();
+                        let w = (label.len() as f32 * 6.2 + 24.0).max(46.0);
                         if px + w > right_x - 8.0 {
                             break;
                         }
-                        let r = Rect::from_min_size(Pos2::new(px, btn_y + 1.0), Vec2::new(w, btn_h - 2.0));
-                        draw_tray_well(painter, r);
-                        painter.text(
-                            r.center(),
-                            egui::Align2::CENTER_CENTER,
-                            &label,
-                            egui::FontId::monospace(10.0),
-                            p.status_green,
-                        );
-                        if ui
-                            .interact(r, Id::unique(("topbar_port", port.port)), Sense::click())
-                            .on_hover_text(format!(
-                                "{} ({})\nClick to open Tailscale Services",
-                                port.label,
-                                port.tailscale_url.as_deref().unwrap_or("")
-                            ))
-                            .clicked()
-                        {
-                            action = Some(DeskbarAction::OpenTailscaleServices);
+                        let r = Rect::from_min_size(Pos2::new(px, btn_y), Vec2::new(w, btn_h));
+                        let active = layout == active_layout;
+                        let resp = ui
+                            .interact(r, Id::unique(("topbar_layout", layout.to_id())), Sense::click())
+                            .on_hover_text(layout.tooltip());
+                        let fill = if active {
+                            if p.is_dark {
+                                Color32::from_rgb(46, 38, 22)
+                            } else {
+                                BEOS_TAB_YELLOW
+                            }
+                        } else if resp.hovered() {
+                            p.widget_hover
+                        } else {
+                            p.widget
+                        };
+                        painter.rect_filled(r, CornerRadius::ZERO, fill);
+                        draw_beos_bevel(painter, r, active);
+                        if active && p.is_dark {
+                            painter.rect_stroke(
+                                r,
+                                CornerRadius::ZERO,
+                                Stroke::new(1.0, p.accent),
+                                egui::StrokeKind::Inside,
+                            );
                         }
-                        px = r.max.x + 4.0;
+                        let fg = if active && p.is_dark {
+                            p.accent
+                        } else if active {
+                            p.text
+                        } else {
+                            p.text_muted
+                        };
+                        let icon_rect = Rect::from_min_size(
+                            Pos2::new(r.min.x + 5.0, r.center().y - 5.0),
+                            Vec2::new(12.0, 10.0),
+                        );
+                        draw_layout_icon(painter, icon_rect, layout, fg);
+                        painter.text(
+                            Pos2::new(icon_rect.max.x + 4.0, r.center().y),
+                            egui::Align2::LEFT_CENTER,
+                            label,
+                            egui::FontId::monospace(10.0),
+                            if active && p.is_dark { p.accent } else { p.text },
+                        );
+                        if resp.clicked() {
+                            action = Some(DeskbarAction::SetLayout(layout));
+                        }
+                        px = r.max.x + 3.0;
                     }
                 }
             });
 
         action
+    }
+}
+
+fn draw_layout_icon(painter: &egui::Painter, rect: Rect, layout: TilingLayout, color: Color32) {
+    let stroke = Stroke::new(1.0, color);
+    let mid_x = rect.center().x;
+    let mid_y = rect.center().y;
+    match layout {
+        TilingLayout::Bsp => {
+            painter.rect_stroke(rect, CornerRadius::ZERO, stroke, egui::StrokeKind::Inside);
+            painter.line_segment([Pos2::new(mid_x, rect.min.y), Pos2::new(mid_x, rect.max.y)], stroke);
+            painter.line_segment([Pos2::new(mid_x, mid_y), Pos2::new(rect.max.x, mid_y)], stroke);
+        }
+        TilingLayout::Columns => {
+            painter.rect_stroke(rect, CornerRadius::ZERO, stroke, egui::StrokeKind::Inside);
+            let x1 = rect.min.x + rect.width() / 3.0;
+            let x2 = rect.min.x + (rect.width() * 2.0) / 3.0;
+            painter.line_segment([Pos2::new(x1, rect.min.y), Pos2::new(x1, rect.max.y)], stroke);
+            painter.line_segment([Pos2::new(x2, rect.min.y), Pos2::new(x2, rect.max.y)], stroke);
+        }
+        TilingLayout::Rows => {
+            painter.rect_stroke(rect, CornerRadius::ZERO, stroke, egui::StrokeKind::Inside);
+            let y1 = rect.min.y + rect.height() / 3.0;
+            let y2 = rect.min.y + (rect.height() * 2.0) / 3.0;
+            painter.line_segment([Pos2::new(rect.min.x, y1), Pos2::new(rect.max.x, y1)], stroke);
+            painter.line_segment([Pos2::new(rect.min.x, y2), Pos2::new(rect.max.x, y2)], stroke);
+        }
+        TilingLayout::Grid => {
+            painter.rect_stroke(rect, CornerRadius::ZERO, stroke, egui::StrokeKind::Inside);
+            painter.line_segment([Pos2::new(mid_x, rect.min.y), Pos2::new(mid_x, rect.max.y)], stroke);
+            painter.line_segment([Pos2::new(rect.min.x, mid_y), Pos2::new(rect.max.x, mid_y)], stroke);
+        }
+        TilingLayout::Focus => {
+            painter.rect_stroke(rect, CornerRadius::ZERO, stroke, egui::StrokeKind::Inside);
+            painter.rect_filled(rect.shrink(2.5), CornerRadius::ZERO, color);
+        }
+        TilingLayout::Float => {
+            let back = Rect::from_min_size(rect.min, Vec2::new(8.0, 6.5));
+            let front = Rect::from_min_size(Pos2::new(rect.min.x + 4.0, rect.min.y + 3.5), Vec2::new(8.0, 6.5));
+            painter.rect_stroke(back, CornerRadius::ZERO, stroke, egui::StrokeKind::Inside);
+            painter.rect_stroke(front, CornerRadius::ZERO, stroke, egui::StrokeKind::Inside);
+        }
     }
 }
 

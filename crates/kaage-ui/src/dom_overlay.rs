@@ -11,6 +11,7 @@ pub enum CopilotCrossAction {
     ViewInVitals,
     OpenInTracker { path: String },
     TailUnitLogs { unit: String },
+    OpenCopilotSettings,
     SendClientMsg(ClientMsg),
 }
 
@@ -111,12 +112,14 @@ impl CopilotWindow {
                     let provider = match arg.to_ascii_lowercase().as_str() {
                         "openai" => Some(CopilotProvider::OpenAi),
                         "gemini" => Some(CopilotProvider::Gemini),
+                        "claude" | "anthropic" => Some(CopilotProvider::Claude),
+                        "local" | "ollama" => Some(CopilotProvider::Local),
                         _ => None,
                     };
                     if let Some(p) = provider {
                         self.items.push(CopilotItem::SystemNotice(format!(
                             "Switching provider to `{}`...",
-                            p.as_str()
+                            p.label()
                         )));
                         return vec![CopilotCrossAction::SendClientMsg(
                             ClientMsg::SetCopilotConfig {
@@ -124,11 +127,12 @@ impl CopilotWindow {
                                 model: None,
                                 trust_mode: None,
                                 target_node: None,
+                                local_endpoint: None,
                             },
                         )];
                     }
                     self.items.push(CopilotItem::SystemNotice(
-                        "Usage: /provider <gemini|openai>".into(),
+                        "Usage: /provider <gemini|openai|claude|local>".into(),
                     ));
                     return Vec::new();
                 }
@@ -143,6 +147,7 @@ impl CopilotWindow {
                                 model: Some(arg.to_string()),
                                 trust_mode: None,
                                 target_node: None,
+                                local_endpoint: None,
                             },
                         )];
                     }
@@ -167,6 +172,7 @@ impl CopilotWindow {
                                 model: None,
                                 trust_mode: Some(m),
                                 target_node: None,
+                                local_endpoint: None,
                             },
                         )];
                     }
@@ -186,6 +192,7 @@ impl CopilotWindow {
                                 model: None,
                                 trust_mode: None,
                                 target_node: Some(arg.to_string()),
+                                local_endpoint: None,
                             },
                         )];
                     }
@@ -243,7 +250,7 @@ impl CopilotWindow {
                 wasm_overlay::render_copilot_dom(self, status);
                 self.dom_dirty = false;
             }
-            return wasm_overlay::drain_dom_actions(self);
+            return wasm_overlay::drain_dom_actions(self, status);
         }
 
         #[cfg(not(target_arch = "wasm32"))]
@@ -277,8 +284,34 @@ impl CopilotWindow {
                     .size(10.5)
                     .color(if st.ready { p.status_green } else { p.status_amber }),
                 );
+                if be_button(ui, "⚙ Keys / Backends").clicked() {
+                    actions.push(CopilotCrossAction::OpenCopilotSettings);
+                }
             }
         });
+        if let Some(st) = status
+            && !st.ready
+        {
+            egui::Frame::NONE
+                .fill(p.well)
+                .stroke(Stroke::new(1.0, p.status_red))
+                .inner_margin(6.0)
+                .show(ui, |ui| {
+                    ui.horizontal_wrapped(|ui| {
+                        ui.label(
+                            RichText::new(format!(
+                                "⚠ Missing {} for {}.",
+                                st.provider.env_var_name(),
+                                st.provider.label()
+                            ))
+                            .color(p.status_red),
+                        );
+                        if be_button(ui, "Configure API Key & Backend").clicked() {
+                            actions.push(CopilotCrossAction::OpenCopilotSettings);
+                        }
+                    });
+                });
+        }
         ui.separator();
 
         let scroll_h = (ui.available_height() - 42.0).max(80.0);
@@ -520,6 +553,8 @@ mod wasm_overlay {
         ViewVitals,
         OpenTracker(String),
         TailLogs(String),
+        OpenSettings,
+        SetKey(String),
     }
 
     static DOM_QUEUE: OnceLock<Mutex<Vec<RawDomEvent>>> = OnceLock::new();
@@ -543,6 +578,8 @@ mod wasm_overlay {
                     "vitals" => RawDomEvent::ViewVitals,
                     "tracker" => RawDomEvent::OpenTracker(arg),
                     "logs" => RawDomEvent::TailLogs(arg),
+                    "settings" => RawDomEvent::OpenSettings,
+                    "setkey" => RawDomEvent::SetKey(arg),
                     _ => return,
                 };
                 queue().lock().unwrap_or_else(|e| e.into_inner()).push(ev);
@@ -656,12 +693,13 @@ mod wasm_overlay {
         };
         if let Some(hdr) = doc.get_element_by_id("kc_header") {
             let html = if let Some(st) = status {
-                let dot = if st.ready { "var(--kaage-green)" } else { "var(--kaage-accent)" };
+                let dot = if st.ready { "var(--kaage-green)" } else { "var(--kaage-red)" };
                 format!(
                     "<span class='kc-title'>✦ Kaage Copilot</span>\
                      <span class='kc-pill' style='border-color:{dot};color:{dot}'>{} · {}</span>\
                      <span class='kc-pill'>{}</span>\
-                     <span class='kc-pill'>@{}</span>",
+                     <span class='kc-pill'>@{}</span>\
+                     <button class='kc-btn' style='margin-left:auto' onclick=\"window.__kaageDispatch('settings','')\">⚙ Backends &amp; Keys</button>",
                     esc(st.provider.as_str()),
                     esc(&st.model),
                     esc(st.trust_mode.as_str()),
@@ -686,6 +724,23 @@ mod wasm_overlay {
 
         if let Some(box_el) = doc.get_element_by_id("kc_messages") {
             let mut html = String::new();
+            if let Some(st) = status
+                && !st.ready
+            {
+                let env_name = st.provider.env_var_name();
+                let prov_name = st.provider.label();
+                html.push_str(&format!(
+                    "<div class='kc-card kc-confirm'>\
+                      <div class='kc-card-hdr'><span>⚠ Missing {env_name} ({prov_name})</span>\
+                      <button class='kc-btn' onclick=\"window.__kaageDispatch('settings','')\">All Backends</button></div>\
+                      <div class='kc-sub'>Paste your key below (kept in daemon RAM) or open Backends &amp; Keys to switch to OpenAI, Claude, or Local Ollama:</div>\
+                      <div class='kc-actions'>\
+                        <input id='kc_quick_key' type='password' placeholder='Paste {env_name}...' style='flex:1;background:var(--kaage-bg);color:var(--kaage-text);border:1px solid var(--kaage-border);padding:4px 6px;font-family:monospace;font-size:11px;' />\
+                        <button class='kc-btn kc-btn-primary' onclick=\"(function(){{var k=document.getElementById('kc_quick_key');if(k&&k.value.trim()){{window.__kaageDispatch('setkey',k.value.trim());k.value='';}}}})()\">Set Key</button>\
+                      </div>\
+                    </div>"
+                ));
+            }
             for item in &win.items {
                 match item {
                     CopilotItem::User(txt) => {
@@ -730,7 +785,10 @@ mod wasm_overlay {
         }
     }
 
-    pub fn drain_dom_actions(win: &mut CopilotWindow) -> Vec<CopilotCrossAction> {
+    pub fn drain_dom_actions(
+        win: &mut CopilotWindow,
+        status: Option<&CopilotStatus>,
+    ) -> Vec<CopilotCrossAction> {
         let events: Vec<RawDomEvent> = {
             let mut q = queue().lock().unwrap_or_else(|e| e.into_inner());
             std::mem::take(&mut *q)
@@ -767,6 +825,17 @@ mod wasm_overlay {
                     out.push(CopilotCrossAction::OpenInTracker { path })
                 }
                 RawDomEvent::TailLogs(unit) => out.push(CopilotCrossAction::TailUnitLogs { unit }),
+                RawDomEvent::OpenSettings => out.push(CopilotCrossAction::OpenCopilotSettings),
+                RawDomEvent::SetKey(api_key) => {
+                    let provider = status.map(|s| s.provider).unwrap_or(CopilotProvider::Gemini);
+                    out.push(CopilotCrossAction::SendClientMsg(
+                        ClientMsg::SetCopilotApiKey {
+                            provider,
+                            api_key,
+                            persist: false,
+                        },
+                    ));
+                }
             }
         }
         out

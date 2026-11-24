@@ -168,9 +168,11 @@ in
         type = lib.types.enum [
           "gemini"
           "openai"
+          "claude"
+          "local"
         ];
         default = "gemini";
-        description = "Default external LLM provider for Kaage Copilot.";
+        description = "Default LLM provider for Kaage Copilot (gemini, openai, claude, or local).";
       };
 
       model = lib.mkOption {
@@ -204,6 +206,18 @@ in
         type = lib.types.nullOr lib.types.path;
         default = null;
         description = "Path to a file containing OPENAI_API_KEY (loaded via systemd LoadCredential so keys never enter /nix/store).";
+      };
+
+      anthropicApiKeyFile = lib.mkOption {
+        type = lib.types.nullOr lib.types.path;
+        default = null;
+        description = "Path to a file containing ANTHROPIC_API_KEY (loaded via systemd LoadCredential so keys never enter /nix/store).";
+      };
+
+      localEndpoint = lib.mkOption {
+        type = lib.types.str;
+        default = "http://127.0.0.1:11434/v1/chat/completions";
+        description = "OpenAI-compatible chat completions endpoint when provider = \"local\" (Ollama / llama.cpp / vLLM).";
       };
     };
   };
@@ -261,6 +275,7 @@ in
           KAAGE_COPILOT_MODEL = cfg.copilot.model;
           KAAGE_COPILOT_TRUST_MODE = cfg.copilot.trustMode;
           KAAGE_COPILOT_FLAKE_PATH = cfg.copilot.flakePath;
+          KAAGE_COPILOT_LOCAL_ENDPOINT = cfg.copilot.localEndpoint;
         };
 
       serviceConfig = {
@@ -271,10 +286,15 @@ in
         Restart = "on-failure";
         RestartSec = 5;
       }
-      // lib.optionalAttrs (cfg.copilot.geminiApiKeyFile != null || cfg.copilot.openaiApiKeyFile != null) {
+      // lib.optionalAttrs (
+        cfg.copilot.geminiApiKeyFile != null
+        || cfg.copilot.openaiApiKeyFile != null
+        || cfg.copilot.anthropicApiKeyFile != null
+      ) {
         LoadCredential =
           lib.optional (cfg.copilot.geminiApiKeyFile != null) "gemini_api_key:${toString cfg.copilot.geminiApiKeyFile}"
-          ++ lib.optional (cfg.copilot.openaiApiKeyFile != null) "openai_api_key:${toString cfg.copilot.openaiApiKeyFile}";
+          ++ lib.optional (cfg.copilot.openaiApiKeyFile != null) "openai_api_key:${toString cfg.copilot.openaiApiKeyFile}"
+          ++ lib.optional (cfg.copilot.anthropicApiKeyFile != null) "anthropic_api_key:${toString cfg.copilot.anthropicApiKeyFile}";
       };
     };
 

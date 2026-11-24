@@ -6,12 +6,13 @@ use crate::settings::SettingsWindow;
 use crate::terminal::TerminalPane;
 use crate::theme::{FontPreset, ThemeMode, UserSettings, preset_palette};
 use crate::vitals::VitalsWindow;
-use crate::wm::{BeTab, BeWindowGroup, BeWindowManager, PaneKind};
+use crate::wm::{BeTab, BeWindowGroup, BeWindowManager, PaneKind, TilingLayout};
 use egui::{Pos2, Vec2};
 use kaage_proto::ClientMsg;
 use serde::{Deserialize, Serialize};
 
 const STORAGE_KEY: &str = "kaage_ui_session_v1";
+const LAYOUTS_STORAGE_KEY: &str = "kaage_ui_layouts_v1";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum SavedPaneKind {
@@ -239,39 +240,67 @@ impl SavedSession {
 }
 
 pub fn load_session() -> Option<SavedSession> {
-    let raw = read_storage_string()?;
+    let raw = read_storage_string(STORAGE_KEY)?;
     let bytes = hex_decode(&raw)?;
     postcard::from_bytes::<SavedSession>(&bytes).ok()
 }
 
 pub fn save_session_bytes(bytes: &[u8]) {
-    write_storage_string(&hex_encode(bytes));
+    write_storage_string(STORAGE_KEY, &hex_encode(bytes));
+}
+
+pub fn load_workspace_layouts() -> [TilingLayout; 4] {
+    let Some(raw) = read_storage_string(LAYOUTS_STORAGE_KEY) else {
+        return [TilingLayout::Bsp; 4];
+    };
+    let Some(bytes) = hex_decode(&raw) else {
+        return [TilingLayout::Bsp; 4];
+    };
+    if bytes.len() != 4 {
+        return [TilingLayout::Bsp; 4];
+    }
+    [
+        TilingLayout::from_id(bytes[0]),
+        TilingLayout::from_id(bytes[1]),
+        TilingLayout::from_id(bytes[2]),
+        TilingLayout::from_id(bytes[3]),
+    ]
+}
+
+pub fn save_workspace_layouts(layouts: [TilingLayout; 4]) {
+    let bytes = [
+        layouts[0].to_id(),
+        layouts[1].to_id(),
+        layouts[2].to_id(),
+        layouts[3].to_id(),
+    ];
+    write_storage_string(LAYOUTS_STORAGE_KEY, &hex_encode(&bytes));
 }
 
 #[cfg(target_arch = "wasm32")]
-fn read_storage_string() -> Option<String> {
+fn read_storage_string(key: &str) -> Option<String> {
     let window = web_sys::window()?;
     let storage = window.local_storage().ok()??;
-    storage.get_item(STORAGE_KEY).ok()?
+    storage.get_item(key).ok()?
 }
 
 #[cfg(target_arch = "wasm32")]
-fn write_storage_string(val: &str) {
+fn write_storage_string(key: &str, val: &str) {
     if let Some(window) = web_sys::window()
         && let Ok(Some(storage)) = window.local_storage()
     {
-        let _ = storage.set_item(STORAGE_KEY, val);
+        let _ = storage.set_item(key, val);
     }
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-fn read_storage_string() -> Option<String> {
-    let _ = STORAGE_KEY;
+fn read_storage_string(_key: &str) -> Option<String> {
+    let _ = (STORAGE_KEY, LAYOUTS_STORAGE_KEY);
     None
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-fn write_storage_string(_val: &str) {}
+fn write_storage_string(_key: &str, _val: &str) {}
 
 fn hex_encode(bytes: &[u8]) -> String {
     const HEX: &[u8; 16] = b"0123456789abcdef";

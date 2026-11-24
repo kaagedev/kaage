@@ -755,12 +755,42 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
                 model,
                 trust_mode,
                 target_node,
+                local_endpoint,
             } => {
-                let st = state
-                    .copilot
-                    .update_config(provider, model, trust_mode, target_node);
+                let st = state.copilot.update_config(
+                    provider,
+                    model,
+                    trust_mode,
+                    target_node,
+                    local_endpoint,
+                );
                 let _ = out_tx.send(ServerMsg::CopilotStatus(st));
             }
+            ClientMsg::SetCopilotApiKey {
+                provider,
+                api_key,
+                persist,
+            } => match state.copilot.set_api_key(provider, api_key, persist) {
+                Ok(st) => {
+                    let _ = out_tx.send(ServerMsg::ActionFeedback {
+                        target: provider.env_var_name().into(),
+                        ok: true,
+                        message: if persist {
+                            "Key saved (0600)".into()
+                        } else {
+                            "Key set in memory".into()
+                        },
+                    });
+                    let _ = out_tx.send(ServerMsg::CopilotStatus(st));
+                }
+                Err(err) => {
+                    let _ = out_tx.send(ServerMsg::ActionFeedback {
+                        target: provider.env_var_name().into(),
+                        ok: false,
+                        message: err,
+                    });
+                }
+            },
             ClientMsg::AskCopilot { request_id, prompt } => {
                 state.copilot.spawn_ask(
                     request_id,

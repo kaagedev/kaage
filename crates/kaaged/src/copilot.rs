@@ -25,6 +25,8 @@ const MAX_TURNS: usize = 8;
 const GEMINI_ENDPOINT: &str =
     "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions";
 const OPENAI_ENDPOINT: &str = "https://api.openai.com/v1/chat/completions";
+const ANTHROPIC_ENDPOINT: &str = "https://api.anthropic.com/v1/messages";
+const DEFAULT_LOCAL_ENDPOINT: &str = "http://127.0.0.1:11434/v1/chat/completions";
 
 pub struct CopilotConfig {
     pub provider: CopilotProvider,
@@ -32,6 +34,19 @@ pub struct CopilotConfig {
     pub trust_mode: TrustMode,
     pub target_node: String,
     pub flake_path: String,
+    pub local_endpoint: String,
+}
+
+#[derive(Default, serde::Serialize, serde::Deserialize)]
+struct SavedApiKeys {
+    #[serde(default)]
+    gemini: Option<String>,
+    #[serde(default)]
+    openai: Option<String>,
+    #[serde(default)]
+    claude: Option<String>,
+    #[serde(default)]
+    local: Option<String>,
 }
 
 pub struct MemoryStore {
@@ -111,6 +126,8 @@ impl MemoryStore {
 
 pub struct CopilotManager {
     config: RwLock<CopilotConfig>,
+    runtime_keys: RwLock<SavedApiKeys>,
+    keys_file: PathBuf,
     local_hostname: String,
     memory: Option<Arc<MemoryStore>>,
     pending_confirms: Mutex<HashMap<String, oneshot::Sender<bool>>>,
@@ -126,6 +143,8 @@ impl CopilotManager {
             .as_str()
         {
             "openai" => CopilotProvider::OpenAi,
+            "claude" | "anthropic" => CopilotProvider::Claude,
+            "local" | "ollama" => CopilotProvider::Local,
             _ => CopilotProvider::Gemini,
         };
         let model = std::env::var("KAAGE_COPILOT_MODEL")
@@ -146,8 +165,20 @@ impl CopilotManager {
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty())
             .unwrap_or_else(|| crate::appdata::expand_user_path("~/dotfiles").display().to_string());
+        let local_endpoint = std::env::var("KAAGE_COPILOT_LOCAL_ENDPOINT")
+            .ok()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| DEFAULT_LOCAL_ENDPOINT.to_string());
 
-        let db_path = crate::appdata::kaage_app_dir().join("memory.db");
+        let kaage_dir = crate::appdata::kaage_app_dir();
+        let db_path = kaage_dir.join("memory.db");
+        let keys_file = kaage_dir.join("copilot_keys.json");
+        let saved_keys: SavedApiKeys = fs::read_to_string(&keys_file)
+            .ok()
+            .and_then(|raw| serde_json::from_str(&raw).ok())
+            .unwrap_or_default();
+
         let memory = match MemoryStore::open(&db_path) {
             Ok(store) => {
                 tracing::info!("Copilot FTS5 memory initialized at {}", db_path.display());
@@ -166,7 +197,10 @@ impl CopilotManager {
                 trust_mode,
                 target_node: local_hostname.clone(),
                 flake_path,
+                local_endpoint,
             }),
+            runtime_keys: RwLock::new(saved_keys),
+            keys_file,
             local_hostname,
             memory,
             pending_confirms: Mutex::new(HashMap::new()),
@@ -175,13 +209,63 @@ impl CopilotManager {
         })
     }
 
+    fn effective_api_key(&self, provider: CopilotProvider) -> Option<String> {
+        let rt = self.runtime_keys.read().unwrap_or_else(|e| e.into_inner());
+        let from_rt = match provider {
+            CopilotProvider::Gemini => rt.gemini.as_deref(),
+            CopilotProvider::OpenAi => rt.openai.as_deref(),
+            CopilotProvider::Claude => rt.claude.as_deref(),
+            CopilotProvider::Local => rt.local.as_deref(),
+        }
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
+        from_rt.or_else(|| resolve_api_key_from_env(provider))
+    }
+
+    pub fn set_api_key(
+        &self,
+        provider: CopilotProvider,
+        api_key: String,
+        persist: bool,
+    ) -> Result<CopilotStatus, String> {
+        let trimmed = api_key.trim().to_string();
+        let val = if trimmed.is_empty() { None } else { Some(trimmed) };
+        {
+            let mut rt = self.runtime_keys.write().unwrap_or_else(|e| e.into_inner());
+            match provider {
+                CopilotProvider::Gemini => rt.gemini = val.clone(),
+                CopilotProvider::OpenAi => rt.openai = val.clone(),
+                CopilotProvider::Claude => rt.claude = val.clone(),
+                CopilotProvider::Local => rt.local = val.clone(),
+            }
+            if persist {
+                if let Some(parent) = self.keys_file.parent() {
+                    let _ = fs::create_dir_all(parent);
+                }
+                let json = serde_json::to_string_pretty(&*rt).map_err(|e| e.to_string())?;
+                fs::write(&self.keys_file, json)
+                    .map_err(|e| format!("Failed to write {}: {e}", self.keys_file.display()))?;
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    let _ = fs::set_permissions(&self.keys_file, fs::Permissions::from_mode(0o600));
+                }
+            }
+        }
+        Ok(self.status())
+    }
+
     pub fn status(&self) -> CopilotStatus {
         let cfg = self.config.read().unwrap_or_else(|e| e.into_inner());
-        let has_gemini = resolve_api_key(CopilotProvider::Gemini).is_some();
-        let has_openai = resolve_api_key(CopilotProvider::OpenAi).is_some();
+        let has_gemini = self.effective_api_key(CopilotProvider::Gemini).is_some();
+        let has_openai = self.effective_api_key(CopilotProvider::OpenAi).is_some();
+        let has_anthropic = self.effective_api_key(CopilotProvider::Claude).is_some();
         let ready = match cfg.provider {
             CopilotProvider::Gemini => has_gemini,
             CopilotProvider::OpenAi => has_openai,
+            CopilotProvider::Claude => has_anthropic,
+            CopilotProvider::Local => !cfg.local_endpoint.trim().is_empty(),
         };
         CopilotStatus {
             provider: cfg.provider,
@@ -191,6 +275,8 @@ impl CopilotManager {
             ready,
             has_gemini_key: has_gemini,
             has_openai_key: has_openai,
+            has_anthropic_key: has_anthropic,
+            local_endpoint: cfg.local_endpoint.clone(),
             flake_path: cfg.flake_path.clone(),
         }
     }
@@ -201,6 +287,7 @@ impl CopilotManager {
         model: Option<String>,
         trust_mode: Option<TrustMode>,
         target_node: Option<String>,
+        local_endpoint: Option<String>,
     ) -> CopilotStatus {
         {
             let mut cfg = self.config.write().unwrap_or_else(|e| e.into_inner());
@@ -223,6 +310,11 @@ impl CopilotManager {
                 && !n.trim().is_empty()
             {
                 cfg.target_node = n.trim().to_string();
+            }
+            if let Some(ep) = local_endpoint
+                && !ep.trim().is_empty()
+            {
+                cfg.local_endpoint = ep.trim().to_string();
             }
         }
         self.status()
@@ -287,21 +379,20 @@ impl CopilotManager {
         out_tx: mpsc::UnboundedSender<ServerMsg>,
     ) {
         let status = self.status();
-        let Some(api_key) = resolve_api_key(status.provider) else {
-            let env_name = match status.provider {
-                CopilotProvider::Gemini => "GEMINI_API_KEY",
-                CopilotProvider::OpenAi => "OPENAI_API_KEY",
-            };
+        let api_key = self.effective_api_key(status.provider);
+        if status.provider != CopilotProvider::Local && api_key.is_none() {
+            let env_name = status.provider.env_var_name();
             let _ = out_tx.send(ServerMsg::CopilotChunk {
                 request_id,
                 delta: format!(
-                    "Copilot is not configured for `{}`: set `{env_name}` (or configure `services.kaage.copilot` key file) and restart `kaaged`.",
-                    status.provider.as_str()
+                    "Copilot is missing `{env_name}` for `{}`. Add the key in the setup banner above or in `kaage-settings → Copilot (AI)`.",
+                    status.provider.label()
                 ),
                 done: true,
             });
             return;
-        };
+        }
+        let api_key = api_key.unwrap_or_default();
 
         let mut recalled_block = String::new();
         if let Some(ref mem) = self.memory {
@@ -343,24 +434,60 @@ impl CopilotManager {
             json!({ "role": "user", "content": prompt }),
         ];
 
-        let endpoint = match status.provider {
-            CopilotProvider::Gemini => GEMINI_ENDPOINT,
-            CopilotProvider::OpenAi => OPENAI_ENDPOINT,
-        };
         let tools = tool_schemas();
 
         for _turn in 0..MAX_TURNS {
-            match stream_openai_compat(
-                endpoint,
-                &api_key,
-                &status.model,
-                &messages,
-                &tools,
-                request_id,
-                &out_tx,
-            )
-            .await
-            {
+            let turn_future = match status.provider {
+                CopilotProvider::Claude => {
+                    stream_anthropic_messages(
+                        &api_key,
+                        &status.model,
+                        &system_prompt,
+                        &messages,
+                        &tools,
+                        request_id,
+                        &out_tx,
+                    )
+                    .await
+                }
+                CopilotProvider::Gemini => {
+                    stream_openai_compat(
+                        GEMINI_ENDPOINT,
+                        &api_key,
+                        &status.model,
+                        &messages,
+                        &tools,
+                        request_id,
+                        &out_tx,
+                    )
+                    .await
+                }
+                CopilotProvider::OpenAi => {
+                    stream_openai_compat(
+                        OPENAI_ENDPOINT,
+                        &api_key,
+                        &status.model,
+                        &messages,
+                        &tools,
+                        request_id,
+                        &out_tx,
+                    )
+                    .await
+                }
+                CopilotProvider::Local => {
+                    stream_openai_compat(
+                        &status.local_endpoint,
+                        &api_key,
+                        &status.model,
+                        &messages,
+                        &tools,
+                        request_id,
+                        &out_tx,
+                    )
+                    .await
+                }
+            };
+            match turn_future {
                 Ok(turn_res) => {
                     if turn_res.tool_calls.is_empty() {
                         let _ = out_tx.send(ServerMsg::CopilotChunk {
@@ -971,7 +1098,221 @@ async fn stream_openai_compat(
     })
 }
 
-fn resolve_api_key(provider: CopilotProvider) -> Option<String> {
+async fn stream_anthropic_messages(
+    api_key: &str,
+    model: &str,
+    system_prompt: &str,
+    messages: &[Value],
+    openai_tools: &Value,
+    request_id: u64,
+    out_tx: &mpsc::UnboundedSender<ServerMsg>,
+) -> Result<TurnResult, String> {
+    // Convert OpenAI-style messages (skipping system) and tools to Anthropic Messages schema
+    let mut anth_msgs = Vec::new();
+    for m in messages {
+        let role = m.get("role").and_then(Value::as_str).unwrap_or("");
+        match role {
+            "user" => {
+                anth_msgs.push(json!({
+                    "role": "user",
+                    "content": m.get("content").and_then(Value::as_str).unwrap_or("")
+                }));
+            }
+            "assistant" => {
+                let mut blocks = Vec::new();
+                if let Some(txt) = m.get("content").and_then(Value::as_str)
+                    && !txt.is_empty()
+                {
+                    blocks.push(json!({ "type": "text", "text": txt }));
+                }
+                if let Some(tcs) = m.get("tool_calls").and_then(Value::as_array) {
+                    for tc in tcs {
+                        let id = tc.get("id").and_then(Value::as_str).unwrap_or("tool_1");
+                        let name = tc
+                            .get("function")
+                            .and_then(|f| f.get("name"))
+                            .and_then(Value::as_str)
+                            .unwrap_or("");
+                        let args_str = tc
+                            .get("function")
+                            .and_then(|f| f.get("arguments"))
+                            .and_then(Value::as_str)
+                            .unwrap_or("{}");
+                        let input: Value =
+                            serde_json::from_str(args_str).unwrap_or_else(|_| json!({}));
+                        blocks.push(json!({
+                            "type": "tool_use",
+                            "id": id,
+                            "name": name,
+                            "input": input
+                        }));
+                    }
+                }
+                anth_msgs.push(json!({ "role": "assistant", "content": blocks }));
+            }
+            "tool" => {
+                let id = m
+                    .get("tool_call_id")
+                    .and_then(Value::as_str)
+                    .unwrap_or("tool_1");
+                let content = m.get("content").and_then(Value::as_str).unwrap_or("");
+                anth_msgs.push(json!({
+                    "role": "user",
+                    "content": [{
+                        "type": "tool_result",
+                        "tool_use_id": id,
+                        "content": content
+                    }]
+                }));
+            }
+            _ => {}
+        }
+    }
+
+    let anth_tools: Vec<Value> = openai_tools
+        .as_array()
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|t| t.get("function"))
+                .map(|f| {
+                    json!({
+                        "name": f.get("name").cloned().unwrap_or(json!("")),
+                        "description": f.get("description").cloned().unwrap_or(json!("")),
+                        "input_schema": f.get("parameters").cloned().unwrap_or(json!({"type":"object","properties":{}}))
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let payload = json!({
+        "model": model,
+        "max_tokens": 4096,
+        "system": system_prompt,
+        "messages": anth_msgs,
+        "tools": anth_tools,
+        "stream": true
+    });
+    let body = serde_json::to_string(&payload).map_err(|e| e.to_string())?;
+
+    let mut child = Command::new("curl")
+        .args([
+            "-sSN",
+            "--no-buffer",
+            "-X",
+            "POST",
+            ANTHROPIC_ENDPOINT,
+            "-H",
+            "Content-Type: application/json",
+            "-H",
+            &format!("x-api-key: {api_key}"),
+            "-H",
+            "anthropic-version: 2023-06-01",
+            "--data-binary",
+            "@-",
+        ])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("Failed to spawn curl: {e}"))?;
+
+    if let Some(mut stdin) = child.stdin.take() {
+        use tokio::io::AsyncWriteExt;
+        stdin
+            .write_all(body.as_bytes())
+            .await
+            .map_err(|e| format!("Write request body failed: {e}"))?;
+    }
+
+    let stdout = child.stdout.take().ok_or("Missing curl stdout")?;
+    let mut lines = BufReader::new(stdout).lines();
+
+    let mut full_content = String::new();
+    let mut tool_map: HashMap<usize, ToolCallAcc> = HashMap::new();
+    let mut raw_error = String::new();
+
+    while let Ok(Some(line)) = lines.next_line().await {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with("event:") {
+            continue;
+        }
+        if let Some(data) = trimmed.strip_prefix("data:") {
+            let data = data.trim();
+            if let Ok(val) = serde_json::from_str::<Value>(data) {
+                let kind = val.get("type").and_then(Value::as_str).unwrap_or("");
+                match kind {
+                    "error" => return Err(val.to_string()),
+                    "content_block_start" => {
+                        let idx = val.get("index").and_then(Value::as_u64).unwrap_or(0) as usize;
+                        if let Some(cb) = val.get("content_block")
+                            && cb.get("type").and_then(Value::as_str) == Some("tool_use")
+                        {
+                            tool_map.insert(
+                                idx,
+                                ToolCallAcc {
+                                    id: cb
+                                        .get("id")
+                                        .and_then(Value::as_str)
+                                        .unwrap_or("tool_1")
+                                        .to_string(),
+                                    name: cb
+                                        .get("name")
+                                        .and_then(Value::as_str)
+                                        .unwrap_or("")
+                                        .to_string(),
+                                    arguments: String::new(),
+                                },
+                            );
+                        }
+                    }
+                    "content_block_delta" => {
+                        let idx = val.get("index").and_then(Value::as_u64).unwrap_or(0) as usize;
+                        if let Some(delta) = val.get("delta") {
+                            let dtype = delta.get("type").and_then(Value::as_str).unwrap_or("");
+                            if dtype == "text_delta"
+                                && let Some(text) = delta.get("text").and_then(Value::as_str)
+                                && !text.is_empty()
+                            {
+                                full_content.push_str(text);
+                                let _ = out_tx.send(ServerMsg::CopilotChunk {
+                                    request_id,
+                                    delta: text.to_string(),
+                                    done: false,
+                                });
+                            } else if dtype == "input_json_delta"
+                                && let Some(part) =
+                                    delta.get("partial_json").and_then(Value::as_str)
+                                && let Some(acc) = tool_map.get_mut(&idx)
+                            {
+                                acc.arguments.push_str(part);
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        } else if raw_error.len() < 1024 {
+            raw_error.push_str(trimmed);
+            raw_error.push(' ');
+        }
+    }
+
+    let _ = child.wait().await;
+    if full_content.is_empty() && tool_map.is_empty() && !raw_error.is_empty() {
+        return Err(raw_error.trim().to_string());
+    }
+    let mut ordered: Vec<(usize, ToolCallAcc)> = tool_map.into_iter().collect();
+    ordered.sort_by_key(|(idx, _)| *idx);
+    let tool_calls = ordered.into_iter().map(|(_, acc)| acc).collect();
+
+    Ok(TurnResult {
+        content: full_content,
+        tool_calls,
+    })
+}
+
+fn resolve_api_key_from_env(provider: CopilotProvider) -> Option<String> {
     let (env_var, file_var, cred_name) = match provider {
         CopilotProvider::Gemini => (
             "GEMINI_API_KEY",
@@ -982,6 +1323,16 @@ fn resolve_api_key(provider: CopilotProvider) -> Option<String> {
             "OPENAI_API_KEY",
             "KAAGE_COPILOT_OPENAI_KEY_FILE",
             "openai_api_key",
+        ),
+        CopilotProvider::Claude => (
+            "ANTHROPIC_API_KEY",
+            "KAAGE_COPILOT_ANTHROPIC_KEY_FILE",
+            "anthropic_api_key",
+        ),
+        CopilotProvider::Local => (
+            "KAAGE_COPILOT_LOCAL_API_KEY",
+            "KAAGE_COPILOT_LOCAL_KEY_FILE",
+            "local_api_key",
         ),
     };
     if let Ok(val) = std::env::var(env_var)

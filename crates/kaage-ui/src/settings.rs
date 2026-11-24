@@ -3,7 +3,7 @@ use crate::theme::{
     preset_palette, user_settings,
 };
 use egui::{Color32, CornerRadius, RichText, ScrollArea, Stroke, Ui};
-use kaage_proto::{AppDataSnapshot, ClientMsg};
+use kaage_proto::{AppDataSnapshot, ClientMsg, CopilotProvider, CopilotStatus, TrustMode};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum SettingsTab {
@@ -11,6 +11,7 @@ pub enum SettingsTab {
     Typography,
     ColorTheme,
     AppData,
+    Copilot,
 }
 
 pub struct SettingsWindow {
@@ -18,6 +19,13 @@ pub struct SettingsWindow {
     pub appdata_input: String,
     pub appdata_dirty: bool,
     pub new_app_name: String,
+    pub copilot_model_input: String,
+    pub copilot_endpoint_input: String,
+    pub copilot_fields_dirty: bool,
+    pub gemini_key_input: String,
+    pub openai_key_input: String,
+    pub anthropic_key_input: String,
+    pub persist_keys_to_disk: bool,
 }
 
 impl SettingsWindow {
@@ -27,6 +35,13 @@ impl SettingsWindow {
             appdata_input: "~/appdata".into(),
             appdata_dirty: false,
             new_app_name: String::new(),
+            copilot_model_input: String::new(),
+            copilot_endpoint_input: String::new(),
+            copilot_fields_dirty: false,
+            gemini_key_input: String::new(),
+            openai_key_input: String::new(),
+            anthropic_key_input: String::new(),
+            persist_keys_to_disk: false,
         }
     }
 
@@ -36,10 +51,17 @@ impl SettingsWindow {
         w
     }
 
+    pub fn new_on_copilot() -> Self {
+        let mut w = Self::new();
+        w.tab = SettingsTab::Copilot;
+        w
+    }
+
     pub fn ui(
         &mut self,
         ui: &mut Ui,
         appdata: Option<&AppDataSnapshot>,
+        copilot_status: Option<&CopilotStatus>,
         send_msg: &mut dyn FnMut(ClientMsg),
     ) {
         let p = palette();
@@ -48,6 +70,12 @@ impl SettingsWindow {
             && let Some(snap) = appdata
         {
             self.appdata_input = snap.appdata_dir.clone();
+        }
+        if !self.copilot_fields_dirty
+            && let Some(st) = copilot_status
+        {
+            self.copilot_model_input = st.model.clone();
+            self.copilot_endpoint_input = st.local_endpoint.clone();
         }
 
         ui.horizontal_wrapped(|ui| {
@@ -80,6 +108,10 @@ impl SettingsWindow {
                 self.tab = SettingsTab::AppData;
                 send_msg(ClientMsg::GetAppDataState);
             }
+            if be_toggle_button(ui, "Copilot (AI)", self.tab == SettingsTab::Copilot).clicked() {
+                self.tab = SettingsTab::Copilot;
+                send_msg(ClientMsg::GetCopilotStatus);
+            }
         });
         ui.separator();
 
@@ -90,6 +122,186 @@ impl SettingsWindow {
                 SettingsTab::Typography => render_typography_tab(ui),
                 SettingsTab::ColorTheme => render_color_theme_tab(ui),
                 SettingsTab::AppData => self.render_appdata_tab(ui, appdata, send_msg),
+                SettingsTab::Copilot => self.render_copilot_tab(ui, copilot_status, send_msg),
+            });
+    }
+
+    fn render_copilot_tab(
+        &mut self,
+        ui: &mut Ui,
+        status: Option<&CopilotStatus>,
+        send_msg: &mut dyn FnMut(ClientMsg),
+    ) {
+        let p = palette();
+        let active_provider = status.map(|s| s.provider).unwrap_or(CopilotProvider::Gemini);
+        let active_trust = status.map(|s| s.trust_mode).unwrap_or(TrustMode::Managed);
+
+        section_title(ui, "ACTIVE LLM BACKEND");
+        ui.horizontal_wrapped(|ui| {
+            for prov in [
+                CopilotProvider::Gemini,
+                CopilotProvider::OpenAi,
+                CopilotProvider::Claude,
+                CopilotProvider::Local,
+            ] {
+                if be_toggle_button(ui, prov.label(), active_provider == prov).clicked() {
+                    self.copilot_fields_dirty = false;
+                    send_msg(ClientMsg::SetCopilotConfig {
+                        provider: Some(prov),
+                        model: None,
+                        trust_mode: None,
+                        target_node: None,
+                        local_endpoint: None,
+                    });
+                }
+            }
+        });
+
+        ui.add_space(6.0);
+        egui::Frame::NONE
+            .fill(p.well)
+            .stroke(Stroke::new(1.0, p.border))
+            .inner_margin(8.0)
+            .show(ui, |ui| {
+                ui.set_min_width(ui.available_width());
+                ui.horizontal_wrapped(|ui| {
+                    ui.label(RichText::new("Model ID:").color(p.text));
+                    if ui
+                        .add(
+                            egui::TextEdit::singleline(&mut self.copilot_model_input)
+                                .desired_width(220.0),
+                        )
+                        .changed()
+                    {
+                        self.copilot_fields_dirty = true;
+                    }
+                    if be_button(ui, "Apply Model").clicked() {
+                        self.copilot_fields_dirty = false;
+                        send_msg(ClientMsg::SetCopilotConfig {
+                            provider: None,
+                            model: Some(self.copilot_model_input.clone()),
+                            trust_mode: None,
+                            target_node: None,
+                            local_endpoint: None,
+                        });
+                    }
+                });
+
+                ui.add_space(4.0);
+                ui.horizontal_wrapped(|ui| {
+                    ui.label(RichText::new("Trust Mode:").color(p.text));
+                    if be_toggle_button(
+                        ui,
+                        "Managed (Confirm Mutations)",
+                        active_trust == TrustMode::Managed,
+                    )
+                    .clicked()
+                    {
+                        send_msg(ClientMsg::SetCopilotConfig {
+                            provider: None,
+                            model: None,
+                            trust_mode: Some(TrustMode::Managed),
+                            target_node: None,
+                            local_endpoint: None,
+                        });
+                    }
+                    if be_toggle_button(
+                        ui,
+                        "Monitored (Read-Only)",
+                        active_trust == TrustMode::Monitored,
+                    )
+                    .clicked()
+                    {
+                        send_msg(ClientMsg::SetCopilotConfig {
+                            provider: None,
+                            model: None,
+                            trust_mode: Some(TrustMode::Monitored),
+                            target_node: None,
+                            local_endpoint: None,
+                        });
+                    }
+                });
+
+                if active_provider == CopilotProvider::Local {
+                    ui.add_space(4.0);
+                    ui.horizontal_wrapped(|ui| {
+                        ui.label(RichText::new("Local Endpoint:").color(p.text));
+                        if ui
+                            .add(
+                                egui::TextEdit::singleline(&mut self.copilot_endpoint_input)
+                                    .hint_text("http://127.0.0.1:11434/v1/chat/completions")
+                                    .desired_width(300.0),
+                            )
+                            .changed()
+                        {
+                            self.copilot_fields_dirty = true;
+                        }
+                        if be_button(ui, "Save URL").clicked() {
+                            self.copilot_fields_dirty = false;
+                            send_msg(ClientMsg::SetCopilotConfig {
+                                provider: None,
+                                model: None,
+                                trust_mode: None,
+                                target_node: None,
+                                local_endpoint: Some(self.copilot_endpoint_input.clone()),
+                            });
+                        }
+                    });
+                }
+            });
+
+        ui.add_space(10.0);
+        section_title(ui, "PROVIDER API KEYS");
+        ui.horizontal_wrapped(|ui| {
+            ui.checkbox(
+                &mut self.persist_keys_to_disk,
+                RichText::new("Persist keys to $KAAGE_APPDATA/kaage/copilot_keys.json (0600) — unchecked keeps keys in daemon RAM only")
+                    .size(11.0)
+                    .color(p.text_muted),
+            );
+        });
+        ui.add_space(4.0);
+
+        let has_gemini = status.map(|s| s.has_gemini_key).unwrap_or(false);
+        let has_openai = status.map(|s| s.has_openai_key).unwrap_or(false);
+        let has_claude = status.map(|s| s.has_anthropic_key).unwrap_or(false);
+        let persist = self.persist_keys_to_disk;
+
+        egui::Frame::NONE
+            .fill(p.well)
+            .stroke(Stroke::new(1.0, p.border))
+            .inner_margin(8.0)
+            .show(ui, |ui| {
+                ui.set_min_width(ui.available_width());
+                render_key_row(
+                    ui,
+                    "GEMINI_API_KEY",
+                    CopilotProvider::Gemini,
+                    has_gemini,
+                    &mut self.gemini_key_input,
+                    persist,
+                    send_msg,
+                );
+                ui.separator();
+                render_key_row(
+                    ui,
+                    "OPENAI_API_KEY",
+                    CopilotProvider::OpenAi,
+                    has_openai,
+                    &mut self.openai_key_input,
+                    persist,
+                    send_msg,
+                );
+                ui.separator();
+                render_key_row(
+                    ui,
+                    "ANTHROPIC_API_KEY",
+                    CopilotProvider::Claude,
+                    has_claude,
+                    &mut self.anthropic_key_input,
+                    persist,
+                    send_msg,
+                );
             });
     }
 
@@ -271,6 +483,56 @@ impl SettingsWindow {
                 }
             });
     }
+}
+
+fn render_key_row(
+    ui: &mut Ui,
+    env_name: &str,
+    provider: CopilotProvider,
+    configured: bool,
+    buf: &mut String,
+    persist: bool,
+    send_msg: &mut dyn FnMut(ClientMsg),
+) {
+    let p = palette();
+    ui.horizontal_wrapped(|ui| {
+        ui.label(RichText::new(env_name).monospace().strong().color(p.text));
+        ui.label(
+            RichText::new(if configured {
+                "● Configured"
+            } else {
+                "● Missing"
+            })
+            .monospace()
+            .size(10.5)
+            .color(if configured {
+                p.status_green
+            } else {
+                p.status_red
+            }),
+        );
+        ui.add(
+            egui::TextEdit::singleline(buf)
+                .password(true)
+                .hint_text("Paste API key...")
+                .desired_width(210.0),
+        );
+        if be_button(ui, "Set Key").clicked() && !buf.trim().is_empty() {
+            send_msg(ClientMsg::SetCopilotApiKey {
+                provider,
+                api_key: buf.trim().to_string(),
+                persist,
+            });
+            buf.clear();
+        }
+        if configured && be_button(ui, "Clear").clicked() {
+            send_msg(ClientMsg::SetCopilotApiKey {
+                provider,
+                api_key: String::new(),
+                persist,
+            });
+        }
+    });
 }
 
 fn fmt_appdata_bytes(b: u64) -> String {

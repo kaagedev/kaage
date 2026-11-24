@@ -21,6 +21,72 @@ use kaage_proto::{
 
 pub const WORKSPACE_NAMES: [&str; 4] = ["1: Ops", "2: AI", "3: Files", "4: Logs"];
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum TilingLayout {
+    #[default]
+    Bsp,
+    Columns,
+    Rows,
+    Grid,
+    Focus,
+    Float,
+}
+
+impl TilingLayout {
+    pub const ALL: [TilingLayout; 6] = [
+        TilingLayout::Bsp,
+        TilingLayout::Columns,
+        TilingLayout::Rows,
+        TilingLayout::Grid,
+        TilingLayout::Focus,
+        TilingLayout::Float,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            TilingLayout::Bsp => "BSP",
+            TilingLayout::Columns => "Cols",
+            TilingLayout::Rows => "Rows",
+            TilingLayout::Grid => "Grid",
+            TilingLayout::Focus => "Focus",
+            TilingLayout::Float => "Float",
+        }
+    }
+
+    pub fn tooltip(self) -> &'static str {
+        match self {
+            TilingLayout::Bsp => "BSP Tiling — balanced recursive split",
+            TilingLayout::Columns => "Columns — side-by-side vertical panes",
+            TilingLayout::Rows => "Rows — stacked horizontal panes",
+            TilingLayout::Grid => "Grid — balanced multi-column tile grid",
+            TilingLayout::Focus => "Focus — maximize active pane (Alt+H/L to cycle)",
+            TilingLayout::Float => "Float — free-floating draggable & resizable windows",
+        }
+    }
+
+    pub fn to_id(self) -> u8 {
+        match self {
+            TilingLayout::Bsp => 0,
+            TilingLayout::Columns => 1,
+            TilingLayout::Rows => 2,
+            TilingLayout::Grid => 3,
+            TilingLayout::Focus => 4,
+            TilingLayout::Float => 5,
+        }
+    }
+
+    pub fn from_id(id: u8) -> Self {
+        match id {
+            1 => TilingLayout::Columns,
+            2 => TilingLayout::Rows,
+            3 => TilingLayout::Grid,
+            4 => TilingLayout::Focus,
+            5 => TilingLayout::Float,
+            _ => TilingLayout::Bsp,
+        }
+    }
+}
+
 pub enum PaneKind {
     Terminal(TerminalPane),
     SystemdInspector {
@@ -70,6 +136,7 @@ pub struct BeWindowGroup {
 pub struct BeWindowManager {
     pub groups: Vec<BeWindowGroup>,
     pub active_workspace: usize,
+    pub workspace_layouts: [TilingLayout; 4],
     pub focused_group: Option<u64>,
     next_id: u64,
 }
@@ -79,8 +146,40 @@ impl BeWindowManager {
         Self {
             groups: Vec::new(),
             active_workspace: 0,
+            workspace_layouts: [TilingLayout::Bsp; 4],
             focused_group: None,
             next_id: 1,
+        }
+    }
+
+    pub fn active_layout(&self) -> TilingLayout {
+        self.workspace_layouts[self.active_workspace.min(3)]
+    }
+
+    pub fn set_active_layout(&mut self, layout: TilingLayout) {
+        let ws = self.active_workspace.min(3);
+        let prev = self.workspace_layouts[ws];
+        self.workspace_layouts[ws] = layout;
+        if layout != TilingLayout::Float {
+            for g in &mut self.groups {
+                if !g.floating && g.workspace == ws {
+                    g.shaded = false;
+                }
+            }
+        } else if prev == TilingLayout::Focus {
+            // Cascade overlapping Focus-mode panes slightly when entering Float mode
+            let mut offset = 0.0;
+            for g in &mut self.groups {
+                if !g.floating && g.workspace == ws {
+                    g.pos.x += offset;
+                    g.pos.y += offset;
+                    g.size = Vec2::new(
+                        (g.size.x * 0.72).max(480.0),
+                        (g.size.y * 0.72).max(320.0),
+                    );
+                    offset += 26.0;
+                }
+            }
         }
     }
 
@@ -305,7 +404,11 @@ impl BeWindowManager {
 
         let tab_height = 22.0;
 
-        // Assign deterministic BSP rects to all tiled groups in the active workspace
+        // Assign deterministic layout rects to all non-floating groups in the active workspace
+        let active_layout = self.active_layout();
+        let is_focus_mode = is_mobile || active_layout == TilingLayout::Focus;
+        let is_float_mode = !is_mobile && active_layout == TilingLayout::Float;
+
         let tiled_indices: Vec<usize> = self
             .groups
             .iter()
@@ -314,34 +417,36 @@ impl BeWindowManager {
             .map(|(idx, _)| idx)
             .collect();
 
-        if is_mobile {
-            // Adaptive mobile deck: active pane fills entire stage
-            let active_gid = self.focused_group.filter(|gid| {
-                self.groups
-                    .iter()
-                    .any(|g| g.id == *gid && (g.floating || g.workspace == self.active_workspace))
+        let focus_visible_tiled_id = if is_focus_mode {
+            let focused_tiled = self.focused_group.filter(|gid| {
+                tiled_indices.iter().any(|&idx| self.groups[idx].id == *gid)
             });
-            let first_visible = tiled_indices.first().map(|&idx| self.groups[idx].id);
-            let chosen = active_gid.or(first_visible);
+            let chosen = focused_tiled.or_else(|| tiled_indices.last().map(|&idx| self.groups[idx].id));
             if let Some(cid) = chosen {
-                self.focused_group = Some(cid);
+                if is_mobile {
+                    self.focused_group = Some(cid);
+                }
                 if let Some(g) = self.groups.iter_mut().find(|g| g.id == cid) {
                     g.pos = stage_rect.min;
                     g.size = Vec2::new(stage_rect.width(), (stage_rect.height() - tab_height).max(160.0));
                     g.shaded = false;
                 }
             }
-        } else if !tiled_indices.is_empty() {
-            let rects = compute_bsp_rects(stage_rect, tiled_indices.len());
-            for (slot, &g_idx) in tiled_indices.iter().enumerate() {
-                if let Some(r) = rects.get(slot) {
-                    self.groups[g_idx].pos = r.min;
-                    self.groups[g_idx].size =
-                        Vec2::new(r.width().max(240.0), (r.height() - tab_height).max(120.0));
-                    self.groups[g_idx].tab_offset = 0.0;
+            chosen
+        } else {
+            if !is_float_mode && !tiled_indices.is_empty() {
+                let rects = compute_layout_rects(active_layout, stage_rect, tiled_indices.len());
+                for (slot, &g_idx) in tiled_indices.iter().enumerate() {
+                    if let Some(r) = rects.get(slot) {
+                        self.groups[g_idx].pos = r.min;
+                        self.groups[g_idx].size =
+                            Vec2::new(r.width().max(240.0), (r.height() - tab_height).max(120.0));
+                        self.groups[g_idx].tab_offset = 0.0;
+                    }
                 }
             }
-        }
+            None
+        };
 
         let mut spawn_requests = Vec::new();
         let mut copilot_actions = Vec::new();
@@ -366,6 +471,9 @@ impl BeWindowManager {
                 continue;
             }
             if is_mobile && Some(group.id) != focused_id {
+                continue;
+            }
+            if !is_mobile && is_focus_mode && !group.floating && Some(group.id) != focus_visible_tiled_id {
                 continue;
             }
 
@@ -523,7 +631,7 @@ impl BeWindowManager {
                             group.active_tab = idx;
                             bring_to_front = Some(group.id);
                         }
-                        if tab_resp.double_clicked() && group.floating {
+                        if tab_resp.double_clicked() && (group.floating || is_float_mode) {
                             group.shaded = !group.shaded;
                         }
                         if tab_resp.dragged() {
@@ -533,7 +641,7 @@ impl BeWindowManager {
                                 if let Some(ptr) = ui.input(|i| i.pointer.interact_pos()) {
                                     detach_req = Some((group.id, idx, ptr));
                                 }
-                            } else if group.floating {
+                            } else if group.floating || is_float_mode {
                                 group.pos += delta;
                                 group.pos.y = group.pos.y.max(TOPBAR_HEIGHT + 2.0);
                             }
@@ -709,7 +817,7 @@ impl BeWindowManager {
                                     help.ui(&mut child_ui);
                                 }
                                 PaneKind::Settings(settings) => {
-                                    settings.ui(&mut child_ui, appdata, send_msg);
+                                    settings.ui(&mut child_ui, appdata, copilot_status, send_msg);
                                 }
                                 PaneKind::Copilot(copilot) => {
                                     copilot_visible_this_frame = true;
@@ -732,8 +840,8 @@ impl BeWindowManager {
                             }
                         }
 
-                        // Resize grip for floating PiP windows
-                        if group.floating {
+                        // Resize grip for floating PiP windows or Float layout mode
+                        if group.floating || is_float_mode {
                             let grip_rect = Rect::from_min_size(
                                 Pos2::new(body_rect.max.x - 14.0, body_rect.max.y - 14.0),
                                 Vec2::splat(14.0),
@@ -911,6 +1019,78 @@ impl BeWindowManager {
             shaded: false,
         });
         self.focused_group = Some(new_group_id);
+    }
+}
+
+/// Compute deterministic tiling rects for the active predefined layout.
+fn compute_layout_rects(layout: TilingLayout, area: Rect, count: usize) -> Vec<Rect> {
+    if count == 0 {
+        return Vec::new();
+    }
+    if count == 1 {
+        return vec![area];
+    }
+    let gap = 6.0;
+    match layout {
+        TilingLayout::Bsp | TilingLayout::Focus | TilingLayout::Float => {
+            compute_bsp_rects(area, count)
+        }
+        TilingLayout::Columns => {
+            let col_w = ((area.width() - gap * (count - 1) as f32) / count as f32).max(120.0);
+            (0..count)
+                .map(|i| {
+                    let x = area.min.x + i as f32 * (col_w + gap);
+                    let max_x = if i + 1 == count {
+                        area.max.x
+                    } else {
+                        x + col_w
+                    };
+                    Rect::from_min_max(Pos2::new(x, area.min.y), Pos2::new(max_x, area.max.y))
+                })
+                .collect()
+        }
+        TilingLayout::Rows => {
+            let row_h = ((area.height() - gap * (count - 1) as f32) / count as f32).max(96.0);
+            (0..count)
+                .map(|i| {
+                    let y = area.min.y + i as f32 * (row_h + gap);
+                    let max_y = if i + 1 == count {
+                        area.max.y
+                    } else {
+                        y + row_h
+                    };
+                    Rect::from_min_max(Pos2::new(area.min.x, y), Pos2::new(area.max.x, max_y))
+                })
+                .collect()
+        }
+        TilingLayout::Grid => {
+            let cols = (count as f32).sqrt().ceil() as usize;
+            let rows = count.div_ceil(cols);
+            let row_h = ((area.height() - gap * (rows - 1) as f32) / rows as f32).max(96.0);
+            let mut out = Vec::with_capacity(count);
+            for r in 0..rows {
+                let items_in_row = if r + 1 == rows {
+                    count - r * cols
+                } else {
+                    cols
+                };
+                let col_w = ((area.width() - gap * (items_in_row - 1) as f32)
+                    / items_in_row as f32)
+                    .max(120.0);
+                let y = area.min.y + r as f32 * (row_h + gap);
+                let max_y = if r + 1 == rows { area.max.y } else { y + row_h };
+                for c in 0..items_in_row {
+                    let x = area.min.x + c as f32 * (col_w + gap);
+                    let max_x = if c + 1 == items_in_row {
+                        area.max.x
+                    } else {
+                        x + col_w
+                    };
+                    out.push(Rect::from_min_max(Pos2::new(x, y), Pos2::new(max_x, max_y)));
+                }
+            }
+            out
+        }
     }
 }
 

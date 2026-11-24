@@ -28,7 +28,9 @@ use kaage_proto::{
     HostMetrics, NixosInfo, ServerMsg, SystemdUnitInfo, SystemdUnitStatus, UnitAction, VitalsTick,
 };
 use palette::{CommandPalette, PaletteAction};
-use session::{SavedSession, load_session, save_session_bytes};
+use session::{
+    SavedSession, load_session, load_workspace_layouts, save_session_bytes, save_workspace_layouts,
+};
 use settings::SettingsWindow;
 use terminal::TerminalPane;
 use theme::{
@@ -176,6 +178,7 @@ impl KaageApp {
 
         let mut tracker = BeTrackerSidebar::new();
         let mut wm = BeWindowManager::new();
+        wm.workspace_layouts = load_workspace_layouts();
         let mut next_pty_id = 1u32;
         let mut next_tracker_pane_id = 1u64;
         let mut pending_startup_msgs = Vec::new();
@@ -556,6 +559,27 @@ impl KaageApp {
         self.wm.open_window(
             "kaage-settings".into(),
             PaneKind::Settings(SettingsWindow::new_on_appdata()),
+            self.stage_origin(28.0, 24.0),
+            Vec2::new(760.0, 520.0),
+        );
+    }
+
+    fn open_copilot_settings(&mut self) {
+        self.send_client_msg(ClientMsg::GetCopilotStatus);
+        for group in &mut self.wm.groups {
+            for (idx, tab) in group.tabs.iter_mut().enumerate() {
+                if let PaneKind::Settings(settings) = &mut tab.kind {
+                    settings.tab = settings::SettingsTab::Copilot;
+                    group.active_tab = idx;
+                    self.wm.active_workspace = group.workspace;
+                    self.wm.focused_group = Some(group.id);
+                    return;
+                }
+            }
+        }
+        self.wm.open_window(
+            "kaage-settings".into(),
+            PaneKind::Settings(SettingsWindow::new_on_copilot()),
             self.stage_origin(28.0, 24.0),
             Vec2::new(760.0, 520.0),
         );
@@ -1009,6 +1033,7 @@ impl eframe::App for KaageApp {
                         ]),
                     );
                 }
+                CopilotCrossAction::OpenCopilotSettings => self.open_copilot_settings(),
                 CopilotCrossAction::SendClientMsg(msg) => self.send_client_msg(msg),
             }
         }
@@ -1024,12 +1049,17 @@ impl eframe::App for KaageApp {
             self.connected,
             self.tracker.visible,
             self.wm.active_workspace,
+            self.wm.active_layout(),
         ) {
             match action {
                 DeskbarAction::OpenPalette => self.cmd_palette.toggle(),
                 DeskbarAction::ToggleTracker => self.tracker.visible = !self.tracker.visible,
                 DeskbarAction::ToggleTheme => self.toggle_theme(&ctx),
                 DeskbarAction::SwitchWorkspace(ws) => self.wm.active_workspace = ws,
+                DeskbarAction::SetLayout(layout) => {
+                    self.wm.set_active_layout(layout);
+                    save_workspace_layouts(self.wm.workspace_layouts);
+                }
                 DeskbarAction::OpenSystemdInspector { scope, state } => {
                     self.wm
                         .open_or_focus_systemd(scope, state, self.tracker.width());
@@ -1037,7 +1067,6 @@ impl eframe::App for KaageApp {
                 }
                 DeskbarAction::OpenVitals => self.open_vitals(),
                 DeskbarAction::OpenTailscale => self.open_tailscale(),
-                DeskbarAction::OpenTailscaleServices => self.open_tailscale_services(),
                 DeskbarAction::OpenHelp => self.open_help(),
                 DeskbarAction::OpenSettings => self.open_settings(),
                 DeskbarAction::OpenCopilot => self.open_copilot(),
