@@ -1,4 +1,5 @@
 mod appdata;
+mod copilot;
 mod files;
 mod nixos;
 mod telemetry;
@@ -54,6 +55,7 @@ struct AppState {
     docker: Option<Docker>,
     vitals: Arc<vitals::VitalsCollector>,
     appdata: Arc<appdata::AppDataManager>,
+    copilot: Arc<copilot::CopilotManager>,
     dist_dir: PathBuf,
 }
 
@@ -197,6 +199,9 @@ async fn main() {
     let vitals = vitals::VitalsCollector::new();
     vitals.spawn_background();
 
+    let local_hostname = System::host_name().unwrap_or_else(|| "kaage-host".into());
+    let copilot = copilot::CopilotManager::new(local_hostname);
+
     let state = Arc::new(AppState {
         allowed_user,
         nixos,
@@ -206,6 +211,7 @@ async fn main() {
         docker,
         vitals,
         appdata,
+        copilot,
         dist_dir: dist_dir.clone(),
     });
 
@@ -740,6 +746,52 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
                         });
                     }
                 }
+            }
+            ClientMsg::GetCopilotStatus => {
+                let _ = out_tx.send(ServerMsg::CopilotStatus(state.copilot.status()));
+            }
+            ClientMsg::SetCopilotConfig {
+                provider,
+                model,
+                trust_mode,
+                target_node,
+            } => {
+                let st = state
+                    .copilot
+                    .update_config(provider, model, trust_mode, target_node);
+                let _ = out_tx.send(ServerMsg::CopilotStatus(st));
+            }
+            ClientMsg::AskCopilot { request_id, prompt } => {
+                state.copilot.spawn_ask(
+                    request_id,
+                    prompt,
+                    state.nixos.clone(),
+                    Arc::clone(&state.vitals),
+                    out_tx.clone(),
+                );
+            }
+            ClientMsg::CancelCopilot { request_id } => {
+                state.copilot.cancel_request(request_id);
+                let _ = out_tx.send(ServerMsg::CopilotChunk {
+                    request_id,
+                    delta: "\n[Cancelled]".into(),
+                    done: true,
+                });
+            }
+            ClientMsg::CopilotConfirmResponse {
+                action_id,
+                approved,
+            } => {
+                let resolved = state.copilot.resolve_confirmation(&action_id, approved);
+                let _ = out_tx.send(ServerMsg::ActionFeedback {
+                    target: action_id,
+                    ok: resolved,
+                    message: if approved {
+                        "Approved".into()
+                    } else {
+                        "Rejected".into()
+                    },
+                });
             }
             ClientMsg::GetUnitStatus { unit, scope } => {
                 let normalized = normalize_service_name(&unit);
@@ -1467,6 +1519,7 @@ mod tests {
             docker: None,
             vitals: vitals::VitalsCollector::new(),
             appdata: appdata::AppDataManager::new(),
+            copilot: copilot::CopilotManager::new("test-host".into()),
             dist_dir: PathBuf::from("dist"),
         })
     }

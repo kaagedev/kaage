@@ -156,6 +156,56 @@ in
         description = "Open tailscaleServe.httpsPort on the tailscale0 firewall interface.";
       };
     };
+
+    copilot = {
+      enable = lib.mkOption {
+        type = lib.types.bool;
+        default = true;
+        description = "Enable Kaage Copilot conversational NixOS & host administration plane.";
+      };
+
+      provider = lib.mkOption {
+        type = lib.types.enum [
+          "gemini"
+          "openai"
+        ];
+        default = "gemini";
+        description = "Default external LLM provider for Kaage Copilot.";
+      };
+
+      model = lib.mkOption {
+        type = lib.types.str;
+        default = "gemini-2.5-flash";
+        description = "Default model ID for Kaage Copilot.";
+      };
+
+      trustMode = lib.mkOption {
+        type = lib.types.enum [
+          "monitored"
+          "managed"
+        ];
+        default = "managed";
+        description = "Trust mode: monitored (read-only) or managed (confirmation-gated mutations).";
+      };
+
+      flakePath = lib.mkOption {
+        type = lib.types.str;
+        default = "/home/${cfg.user}/dotfiles";
+        description = "Path to the host NixOS flake repository used by Copilot tools.";
+      };
+
+      geminiApiKeyFile = lib.mkOption {
+        type = lib.types.nullOr lib.types.path;
+        default = null;
+        description = "Path to a file containing GEMINI_API_KEY (loaded via systemd LoadCredential so keys never enter /nix/store).";
+      };
+
+      openaiApiKeyFile = lib.mkOption {
+        type = lib.types.nullOr lib.types.path;
+        default = null;
+        description = "Path to a file containing OPENAI_API_KEY (loaded via systemd LoadCredential so keys never enter /nix/store).";
+      };
+    };
   };
 
   config = lib.mkIf cfg.enable {
@@ -205,6 +255,12 @@ in
         }
         // lib.optionalAttrs (cfg.appDataDir != null) {
           KAAGE_APPDATA = cfg.appDataDir;
+        }
+        // lib.optionalAttrs cfg.copilot.enable {
+          KAAGE_COPILOT_PROVIDER = cfg.copilot.provider;
+          KAAGE_COPILOT_MODEL = cfg.copilot.model;
+          KAAGE_COPILOT_TRUST_MODE = cfg.copilot.trustMode;
+          KAAGE_COPILOT_FLAKE_PATH = cfg.copilot.flakePath;
         };
 
       serviceConfig = {
@@ -214,6 +270,11 @@ in
         ExecStart = startScript;
         Restart = "on-failure";
         RestartSec = 5;
+      }
+      // lib.optionalAttrs (cfg.copilot.geminiApiKeyFile != null || cfg.copilot.openaiApiKeyFile != null) {
+        LoadCredential =
+          lib.optional (cfg.copilot.geminiApiKeyFile != null) "gemini_api_key:${toString cfg.copilot.geminiApiKeyFile}"
+          ++ lib.optional (cfg.copilot.openaiApiKeyFile != null) "openai_api_key:${toString cfg.copilot.openaiApiKeyFile}";
       };
     };
 

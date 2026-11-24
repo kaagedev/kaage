@@ -35,6 +35,7 @@ pub enum PaletteAction {
     OpenHelp,
     OpenSettings,
     OpenAppDataSettings,
+    OpenCopilot,
     NewTerminal,
     ToggleTheme,
     ToggleWallpaper,
@@ -253,6 +254,12 @@ fn build_items(
 ) -> Vec<PaletteItem> {
     let q = query.trim().to_ascii_lowercase();
     let mut all = vec![
+        PaletteItem {
+            label: "Open Kaage Copilot (AI Assistant)".into(),
+            category: "AI",
+            shortcut: "✦".into(),
+            action: PaletteAction::OpenCopilot,
+        },
         PaletteItem {
             label: "Open Kaage Vitals (Telemetry Cockpit)".into(),
             category: "APP",

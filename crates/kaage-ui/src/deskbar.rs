@@ -26,6 +26,7 @@ pub enum DeskbarAction {
     OpenTailscaleServices,
     OpenHelp,
     OpenSettings,
+    OpenCopilot,
 }
 
 impl BeDeskbar {
@@ -289,6 +290,35 @@ impl BeDeskbar {
                         action = Some(DeskbarAction::OpenSettings);
                     }
                     right_x = cfg_rect.min.x - 5.0;
+                }
+
+                // 2d) "✦ AI" Copilot launcher button
+                let ai_w = 46.0;
+                if right_x - ai_w > left_x + 20.0 {
+                    let ai_rect = Rect::from_min_size(
+                        Pos2::new(right_x - ai_w, btn_y),
+                        Vec2::new(ai_w, btn_h),
+                    );
+                    let resp = ui
+                        .interact(ai_rect, Id::unique("topbar_copilot"), Sense::click())
+                        .on_hover_text("Open Kaage Copilot (AI Assistant)");
+                    painter.rect_filled(
+                        ai_rect,
+                        CornerRadius::ZERO,
+                        if resp.hovered() { p.widget_hover } else { p.widget },
+                    );
+                    draw_beos_bevel(painter, ai_rect, false);
+                    painter.text(
+                        ai_rect.center(),
+                        egui::Align2::CENTER_CENTER,
+                        "✦ AI",
+                        egui::FontId::monospace(10.5),
+                        p.accent,
+                    );
+                    if resp.clicked() {
+                        action = Some(DeskbarAction::OpenCopilot);
+                    }
+                    right_x = ai_rect.min.x - 5.0;
                 }
 
                 // 3) Live 3-bar CPU / RAM / GPU Sparkbars + WS LED

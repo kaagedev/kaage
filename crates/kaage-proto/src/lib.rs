@@ -506,6 +506,95 @@ pub struct AppDataSnapshot {
     pub apps: Vec<AppDataDirInfo>,
 }
 
+// --- Kaage Copilot Protocol Types ---
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum CopilotProvider {
+    #[default]
+    Gemini,
+    OpenAi,
+}
+
+impl CopilotProvider {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Gemini => "gemini",
+            Self::OpenAi => "openai",
+        }
+    }
+
+    pub fn default_model(self) -> &'static str {
+        match self {
+            Self::Gemini => "gemini-2.5-flash",
+            Self::OpenAi => "gpt-4o",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum TrustMode {
+    Monitored,
+    #[default]
+    Managed,
+}
+
+impl TrustMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Monitored => "monitored",
+            Self::Managed => "managed",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CopilotStatus {
+    pub provider: CopilotProvider,
+    pub model: String,
+    pub trust_mode: TrustMode,
+    pub target_node: String,
+    pub ready: bool,
+    pub has_gemini_key: bool,
+    pub has_openai_key: bool,
+    pub flake_path: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum CopilotCard {
+    NixDiff {
+        file_path: String,
+        diff: String,
+        dry_build_ok: Option<bool>,
+        summary: String,
+    },
+    UnitCard {
+        unit: String,
+        active_state: String,
+        sub_state: String,
+        summary: String,
+        error_lines: Vec<String>,
+    },
+    VitalsSlice {
+        start_ts: i64,
+        end_ts: i64,
+        metric_label: String,
+        points: Vec<f32>,
+        top_consumers: Vec<(String, String)>,
+    },
+    ConfirmGate {
+        action_id: String,
+        target_node: String,
+        summary: String,
+        preview: String,
+        rollback_cmd: String,
+    },
+    MemoryNote {
+        saved: bool,
+        category: String,
+        summary: String,
+    },
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ClientMsg {
     ListUnits,
@@ -584,6 +673,24 @@ pub enum ClientMsg {
     CreateAppDataDir {
         app_name: String,
     },
+    GetCopilotStatus,
+    SetCopilotConfig {
+        provider: Option<CopilotProvider>,
+        model: Option<String>,
+        trust_mode: Option<TrustMode>,
+        target_node: Option<String>,
+    },
+    AskCopilot {
+        request_id: u64,
+        prompt: String,
+    },
+    CancelCopilot {
+        request_id: u64,
+    },
+    CopilotConfirmResponse {
+        action_id: String,
+        approved: bool,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -621,6 +728,26 @@ pub enum ServerMsg {
     },
     WorkspacesSnapshot(Vec<WorkspaceDef>),
     AppDataState(AppDataSnapshot),
+    CopilotStatus(CopilotStatus),
+    CopilotToolStatus {
+        request_id: u64,
+        tool_name: String,
+        target_node: String,
+        state: String,
+    },
+    CopilotChunk {
+        request_id: u64,
+        delta: String,
+        done: bool,
+    },
+    CopilotCard {
+        request_id: u64,
+        card: CopilotCard,
+    },
+    CopilotConfirmRequest {
+        request_id: u64,
+        gate: CopilotCard,
+    },
 }
 
 #[cfg(test)]

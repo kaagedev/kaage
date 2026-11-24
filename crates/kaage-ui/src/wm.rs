@@ -1,3 +1,4 @@
+use crate::dom_overlay::{CopilotCrossAction, CopilotWindow, hide_copilot_overlay};
 use crate::file_tracker::{TrackerSpawnRequest, TrackerWindow};
 use crate::help::HelpWindow;
 use crate::inspectors::{
@@ -14,8 +15,8 @@ use crate::theme::{TOPBAR_HEIGHT, draw_beos_bevel, palette};
 use crate::vitals::{VitalsSpawnRequest, VitalsWindow};
 use egui::{Color32, CornerRadius, Id, Key, Pos2, Rect, Sense, Stroke, Vec2};
 use kaage_proto::{
-    AppDataSnapshot, ClientMsg, ContainerInfo, DashboardSnapshot, NixosInfo, SystemdUnitInfo,
-    SystemdUnitStatus,
+    AppDataSnapshot, ClientMsg, ContainerInfo, CopilotStatus, DashboardSnapshot, NixosInfo,
+    SystemdUnitInfo, SystemdUnitStatus,
 };
 
 pub const WORKSPACE_NAMES: [&str; 4] = ["1: Ops", "2: AI", "3: Files", "4: Logs"];
@@ -45,6 +46,7 @@ pub enum PaneKind {
     Vitals(Box<VitalsWindow>),
     Help(HelpWindow),
     Settings(SettingsWindow),
+    Copilot(Box<CopilotWindow>),
 }
 
 pub struct BeTab {
@@ -249,10 +251,11 @@ impl BeWindowManager {
         containers: &[ContainerInfo],
         dashboard: Option<&DashboardSnapshot>,
         appdata: Option<&AppDataSnapshot>,
+        copilot_status: Option<&CopilotStatus>,
         cpu_history: &[f32],
         mem_history: &[f32],
         send_msg: &mut dyn FnMut(ClientMsg),
-    ) -> Vec<InspectorSpawnRequest> {
+    ) -> (Vec<InspectorSpawnRequest>, Vec<CopilotCrossAction>) {
         let p = palette();
         let screen = ctx.content_rect();
         let is_mobile = screen.width() < 768.0;
@@ -341,6 +344,9 @@ impl BeWindowManager {
         }
 
         let mut spawn_requests = Vec::new();
+        let mut copilot_actions = Vec::new();
+        let mut copilot_visible_this_frame = false;
+        let any_dragging = ctx.input(|i| i.pointer.any_down());
         let mut merge_req: Option<(u64, usize, u64)> = None;
         let mut detach_req: Option<(u64, usize, Pos2)> = None;
         let mut close_req: Option<(u64, usize)> = None;
@@ -705,6 +711,24 @@ impl BeWindowManager {
                                 PaneKind::Settings(settings) => {
                                     settings.ui(&mut child_ui, appdata, send_msg);
                                 }
+                                PaneKind::Copilot(copilot) => {
+                                    copilot_visible_this_frame = true;
+                                    let z = if group.floating {
+                                        600
+                                    } else if is_focused {
+                                        500
+                                    } else {
+                                        450
+                                    };
+                                    let acts = copilot.ui(
+                                        &mut child_ui,
+                                        inner_rect,
+                                        copilot_status,
+                                        any_dragging,
+                                        z,
+                                    );
+                                    copilot_actions.extend(acts);
+                                }
                             }
                         }
 
@@ -795,7 +819,11 @@ impl BeWindowManager {
             }
         }
 
-        spawn_requests
+        if !copilot_visible_this_frame {
+            hide_copilot_overlay();
+        }
+
+        (spawn_requests, copilot_actions)
     }
 
     fn cycle_focus(&mut self, dir: isize) {

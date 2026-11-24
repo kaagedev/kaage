@@ -1,6 +1,7 @@
 mod clock;
 mod deskbar;
 mod desktop_icons;
+mod dom_overlay;
 mod file_tracker;
 mod help;
 mod inspectors;
@@ -16,14 +17,15 @@ mod wm;
 
 use deskbar::{BeDeskbar, DeskbarAction};
 use desktop_icons::{DesktopIconAction, show_desktop_icons};
+use dom_overlay::{CopilotCrossAction, CopilotWindow, is_dom_overlay_focused};
 use eframe::egui::{self, Color32, CornerRadius, Id, Pos2, Rect, Stroke, Vec2};
 use ewebsock::{WsEvent, WsMessage, WsReceiver, WsSender};
 use file_tracker::TrackerWindow;
 use help::HelpWindow;
 use inspectors::{InspectorSpawnRequest, ScopeFilter, StateFilter};
 use kaage_proto::{
-    AppDataSnapshot, ClientMsg, ContainerInfo, DashboardSnapshot, FileOp, HostMetrics, NixosInfo,
-    ServerMsg, SystemdUnitInfo, SystemdUnitStatus, UnitAction, VitalsTick,
+    AppDataSnapshot, ClientMsg, ContainerInfo, CopilotStatus, DashboardSnapshot, FileOp,
+    HostMetrics, NixosInfo, ServerMsg, SystemdUnitInfo, SystemdUnitStatus, UnitAction, VitalsTick,
 };
 use palette::{CommandPalette, PaletteAction};
 use session::{SavedSession, load_session, save_session_bytes};
@@ -116,6 +118,7 @@ struct KaageApp {
     latest_vital: Option<VitalsTick>,
     dashboard: Option<DashboardSnapshot>,
     appdata: Option<AppDataSnapshot>,
+    copilot_status: Option<CopilotStatus>,
     cpu_history: Vec<f32>,
     mem_history: Vec<f32>,
     units: Vec<SystemdUnitInfo>,
@@ -274,6 +277,7 @@ impl KaageApp {
             latest_vital: None,
             dashboard: None,
             appdata: None,
+            copilot_status: None,
             cpu_history: Vec::with_capacity(MAX_HISTORY_SAMPLES),
             mem_history: Vec::with_capacity(MAX_HISTORY_SAMPLES),
             units: Vec::new(),
@@ -321,6 +325,7 @@ impl KaageApp {
         self.send_client_msg(ClientMsg::ListContainers);
         self.send_client_msg(ClientMsg::RefreshDashboard);
         self.send_client_msg(ClientMsg::GetAppDataState);
+        self.send_client_msg(ClientMsg::GetCopilotStatus);
         let startup = std::mem::take(&mut self.pending_startup_msgs);
         for msg in startup {
             self.send_client_msg(msg);
@@ -556,6 +561,22 @@ impl KaageApp {
         );
     }
 
+    fn open_copilot(&mut self) {
+        self.send_client_msg(ClientMsg::GetCopilotStatus);
+        if self
+            .wm
+            .focus_matching_tab(|k| matches!(k, PaneKind::Copilot(_)))
+        {
+            return;
+        }
+        self.wm.open_window(
+            "Copilot (AI)".into(),
+            PaneKind::Copilot(Box::new(CopilotWindow::new())),
+            self.stage_origin(32.0, 24.0),
+            Vec2::new(620.0, 520.0),
+        );
+    }
+
     fn toggle_theme(&mut self, ctx: &egui::Context) {
         self.theme_mode = current_theme_mode().toggle();
         apply_theme(ctx, self.theme_mode);
@@ -577,27 +598,30 @@ impl eframe::App for KaageApp {
         ctx.request_repaint_after(std::time::Duration::from_secs(1));
 
         // Global Command Palette shortcut: Cmd+/ (macOS) or Ctrl+` (Linux/Windows).
-        #[cfg(target_arch = "wasm32")]
-        {
-            if WASM_PALETTE_TRIGGER.swap(false, std::sync::atomic::Ordering::Relaxed) {
-                self.cmd_palette.toggle();
+        // Suppress while HTML DOM overlay prompt textarea holds focus.
+        if !is_dom_overlay_focused() {
+            #[cfg(target_arch = "wasm32")]
+            {
+                if WASM_PALETTE_TRIGGER.swap(false, std::sync::atomic::Ordering::Relaxed) {
+                    self.cmd_palette.toggle();
+                }
             }
-        }
-        #[cfg(not(target_arch = "wasm32"))]
-        {
-            let triggered = ctx.input(|i| {
-                let cmd_slash = i.modifiers.mac_cmd
-                    && !i.modifiers.ctrl
-                    && !i.modifiers.alt
-                    && i.key_pressed(egui::Key::Slash);
-                let ctrl_backtick = i.modifiers.ctrl
-                    && !i.modifiers.mac_cmd
-                    && !i.modifiers.alt
-                    && i.key_pressed(egui::Key::Backtick);
-                cmd_slash || ctrl_backtick
-            });
-            if triggered {
-                self.cmd_palette.toggle();
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                let triggered = ctx.input(|i| {
+                    let cmd_slash = i.modifiers.mac_cmd
+                        && !i.modifiers.ctrl
+                        && !i.modifiers.alt
+                        && i.key_pressed(egui::Key::Slash);
+                    let ctrl_backtick = i.modifiers.ctrl
+                        && !i.modifiers.mac_cmd
+                        && !i.modifiers.alt
+                        && i.key_pressed(egui::Key::Backtick);
+                    cmd_slash || ctrl_backtick
+                });
+                if triggered {
+                    self.cmd_palette.toggle();
+                }
             }
         }
 
@@ -730,6 +754,60 @@ impl eframe::App for KaageApp {
                             }
                             ServerMsg::SearchResults { .. } => {}
                             ServerMsg::AppDataState(snap) => self.appdata = Some(snap),
+                            ServerMsg::CopilotStatus(st) => {
+                                self.copilot_status = Some(st);
+                                for g in &mut self.wm.groups {
+                                    for t in &mut g.tabs {
+                                        if let PaneKind::Copilot(c) = &mut t.kind {
+                                            c.dom_dirty = true;
+                                        }
+                                    }
+                                }
+                            }
+                            ServerMsg::CopilotToolStatus {
+                                request_id: _,
+                                tool_name,
+                                target_node,
+                                state,
+                            } => {
+                                for g in &mut self.wm.groups {
+                                    for t in &mut g.tabs {
+                                        if let PaneKind::Copilot(c) = &mut t.kind {
+                                            c.on_tool_status(
+                                                tool_name.clone(),
+                                                target_node.clone(),
+                                                state.clone(),
+                                            );
+                                        }
+                                    }
+                                }
+                            }
+                            ServerMsg::CopilotChunk {
+                                request_id,
+                                delta,
+                                done,
+                            } => {
+                                for g in &mut self.wm.groups {
+                                    for t in &mut g.tabs {
+                                        if let PaneKind::Copilot(c) = &mut t.kind {
+                                            c.on_chunk(request_id, delta.clone(), done);
+                                        }
+                                    }
+                                }
+                            }
+                            ServerMsg::CopilotCard { request_id: _, card }
+                            | ServerMsg::CopilotConfirmRequest {
+                                request_id: _,
+                                gate: card,
+                            } => {
+                                for g in &mut self.wm.groups {
+                                    for t in &mut g.tabs {
+                                        if let PaneKind::Copilot(c) = &mut t.kind {
+                                            c.on_card(card.clone());
+                                        }
+                                    }
+                                }
+                            }
                         }
                     }
                 }
@@ -835,6 +913,7 @@ impl eframe::App for KaageApp {
                     TrackerAction::OpenFileTracker => self.open_file_tracker(),
                     TrackerAction::OpenHelp => self.open_help(),
                     TrackerAction::OpenSettings => self.open_settings(),
+                    TrackerAction::OpenCopilot => self.open_copilot(),
                     TrackerAction::OpenJournal { user } => {
                         let (title, cmd) = if user {
                             (
@@ -865,7 +944,7 @@ impl eframe::App for KaageApp {
 
         // Hybrid BSP Tiling + Pinned PiP Windows
         let mut outbound = Vec::new();
-        let spawn_reqs = self.wm.show(
+        let (spawn_reqs, copilot_actions) = self.wm.show(
             &ctx,
             sidebar_width,
             self.nixos.as_ref(),
@@ -874,6 +953,7 @@ impl eframe::App for KaageApp {
             &self.containers,
             self.dashboard.as_ref(),
             self.appdata.as_ref(),
+            self.copilot_status.as_ref(),
             &self.cpu_history,
             &self.mem_history,
             &mut |msg| {
@@ -888,6 +968,48 @@ impl eframe::App for KaageApp {
                 InspectorSpawnRequest::OpenCommandTab { title, cmd } => {
                     self.spawn_terminal_window(title, Some(cmd));
                 }
+            }
+        }
+        for act in copilot_actions {
+            match act {
+                CopilotCrossAction::ViewInVitals => self.open_vitals(),
+                CopilotCrossAction::OpenInTracker { path } => {
+                    self.open_file_tracker();
+                    let dir = std::path::Path::new(&path)
+                        .parent()
+                        .map(|p| p.display().to_string())
+                        .unwrap_or(path);
+                    let pane_ids: Vec<u64> = self
+                        .wm
+                        .groups
+                        .iter()
+                        .flat_map(|g| g.tabs.iter())
+                        .filter_map(|t| match &t.kind {
+                            PaneKind::FileTracker(trk) => Some(trk.left.pane_id),
+                            _ => None,
+                        })
+                        .collect();
+                    for pane_id in pane_ids {
+                        self.send_client_msg(ClientMsg::ListDir {
+                            pane_id,
+                            path: dir.clone(),
+                        });
+                    }
+                }
+                CopilotCrossAction::TailUnitLogs { unit } => {
+                    self.spawn_terminal_window(
+                        format!("logs: {unit}"),
+                        Some(vec![
+                            "journalctl".into(),
+                            "-u".into(),
+                            unit,
+                            "-n".into(),
+                            "100".into(),
+                            "-f".into(),
+                        ]),
+                    );
+                }
+                CopilotCrossAction::SendClientMsg(msg) => self.send_client_msg(msg),
             }
         }
 
@@ -918,6 +1040,7 @@ impl eframe::App for KaageApp {
                 DeskbarAction::OpenTailscaleServices => self.open_tailscale_services(),
                 DeskbarAction::OpenHelp => self.open_help(),
                 DeskbarAction::OpenSettings => self.open_settings(),
+                DeskbarAction::OpenCopilot => self.open_copilot(),
             }
         }
 
@@ -941,6 +1064,7 @@ impl eframe::App for KaageApp {
                 PaletteAction::OpenHelp => self.open_help(),
                 PaletteAction::OpenSettings => self.open_settings(),
                 PaletteAction::OpenAppDataSettings => self.open_appdata_settings(),
+                PaletteAction::OpenCopilot => self.open_copilot(),
                 PaletteAction::NewTerminal => {
                     self.spawn_terminal_window("Terminal — shell".into(), None);
                 }
