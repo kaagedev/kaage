@@ -51,6 +51,7 @@ let
     ];
 
     nativeBuildInputs = [ pkgs.pkg-config ];
+    buildInputs = [ pkgs.sqlite ];
 
     meta = with lib; {
       description = "kaage BeOS-style service & terminal webtop host daemon";
