@@ -6,6 +6,7 @@ mod help;
 mod inspectors;
 mod palette;
 mod panels;
+mod session;
 mod settings;
 mod terminal;
 mod theme;
@@ -25,11 +26,12 @@ use kaage_proto::{
     ServerMsg, SystemdUnitInfo, SystemdUnitStatus, UnitAction, VitalsTick,
 };
 use palette::{CommandPalette, PaletteAction};
+use session::{SavedSession, load_session, save_session_bytes};
 use settings::SettingsWindow;
 use terminal::TerminalPane;
 use theme::{
-    TOPBAR_HEIGHT, ThemeMode, apply_theme, configure_fonts, current_theme_mode, draw_beos_bevel,
-    draw_dot_grid, palette as active_palette,
+    TOPBAR_HEIGHT, ThemeMode, apply_theme, apply_user_settings, configure_fonts, current_theme_mode,
+    draw_beos_bevel, draw_dot_grid, palette as active_palette, user_settings,
 };
 use tracker::{BeTrackerSidebar, TrackerAction};
 use vitals::VitalsWindow;
@@ -39,15 +41,13 @@ const WALLPAPER_BYTES: &[u8] = include_bytes!("../../../assets/kaage-wallpaper.j
 const MAX_HISTORY_SAMPLES: usize = 60;
 
 #[cfg(target_arch = "wasm32")]
-static WASM_SHIFT_DOUBLE_TAP: std::sync::atomic::AtomicBool =
+static WASM_PALETTE_TRIGGER: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 
-/// Attach native DOM `keydown`/`keyup` listeners on `window` so double-tapping Shift works
-/// reliably in Firefox, Safari, Chrome, and Edge even when `eframe` coalesces fast modifier taps.
+/// Attach a capture-phase DOM `keydown` listener on `window` for Cmd+/ (macOS) and Ctrl+` (other OSes)
+/// so the Command HUD opens reliably in Firefox, Edge, Safari, and Chrome even inside focused terminals.
 #[cfg(target_arch = "wasm32")]
-fn install_wasm_shift_double_tap_listener(ctx: egui::Context) {
-    use std::cell::Cell;
-    use std::rc::Rc;
+fn install_wasm_palette_shortcut_listener(ctx: egui::Context) {
     use std::sync::atomic::Ordering;
     use wasm_bindgen::JsCast;
     use wasm_bindgen::closure::Closure;
@@ -56,52 +56,31 @@ fn install_wasm_shift_double_tap_listener(ctx: egui::Context) {
         return;
     };
 
-    // (used_with_other_key, last_solo_shift_release_ms)
-    let state = Rc::new(Cell::new((false, 0.0_f64)));
+    let on_keydown = Closure::<dyn FnMut(web_sys::KeyboardEvent)>::new(
+        move |e: web_sys::KeyboardEvent| {
+            let cmd_slash = e.meta_key()
+                && !e.ctrl_key()
+                && !e.alt_key()
+                && (e.key() == "/" || e.code() == "Slash");
+            let ctrl_backtick = e.ctrl_key()
+                && !e.meta_key()
+                && !e.alt_key()
+                && (e.key() == "`" || e.code() == "Backquote");
 
-    {
-        let st = Rc::clone(&state);
-        let on_keydown = Closure::<dyn FnMut(web_sys::KeyboardEvent)>::new(move |e: web_sys::KeyboardEvent| {
-            let (used_other, last_ms) = st.get();
-            if e.key() == "Shift" {
-                if !e.repeat() {
-                    if e.ctrl_key() || e.alt_key() || e.meta_key() {
-                        st.set((true, 0.0));
-                    } else {
-                        st.set((false, last_ms));
-                    }
-                }
-            } else {
-                let _ = used_other;
-                st.set((true, 0.0));
+            if (cmd_slash || ctrl_backtick) && !e.repeat() {
+                e.prevent_default();
+                e.stop_propagation();
+                WASM_PALETTE_TRIGGER.store(true, Ordering::Relaxed);
+                ctx.request_repaint();
             }
-        });
-        let _ = window.add_event_listener_with_callback("keydown", on_keydown.as_ref().unchecked_ref());
-        on_keydown.forget();
-    }
-
-    {
-        let st = Rc::clone(&state);
-        let on_keyup = Closure::<dyn FnMut(web_sys::KeyboardEvent)>::new(move |e: web_sys::KeyboardEvent| {
-            if e.key() == "Shift" {
-                let (used_other, last_ms) = st.get();
-                if !used_other && !e.ctrl_key() && !e.alt_key() && !e.meta_key() {
-                    let now_ms = js_sys::Date::now();
-                    if now_ms - last_ms <= 450.0 {
-                        WASM_SHIFT_DOUBLE_TAP.store(true, Ordering::Relaxed);
-                        st.set((false, 0.0));
-                        ctx.request_repaint();
-                    } else {
-                        st.set((false, now_ms));
-                    }
-                } else {
-                    st.set((false, 0.0));
-                }
-            }
-        });
-        let _ = window.add_event_listener_with_callback("keyup", on_keyup.as_ref().unchecked_ref());
-        on_keyup.forget();
-    }
+        },
+    );
+    let _ = window.add_event_listener_with_callback_and_bool(
+        "keydown",
+        on_keydown.as_ref().unchecked_ref(),
+        true,
+    );
+    on_keydown.forget();
 }
 
 struct ToastNotice {
@@ -134,14 +113,11 @@ struct KaageApp {
     containers: Vec<ContainerInfo>,
     next_pty_id: u32,
     next_tracker_pane_id: u64,
+    pending_startup_msgs: Vec<ClientMsg>,
+    last_saved_session: Vec<u8>,
+    last_session_save_at: f64,
     pending_undo: Option<ClientMsg>,
     toast: Option<ToastNotice>,
-    #[cfg(not(target_arch = "wasm32"))]
-    shift_was_down: bool,
-    #[cfg(not(target_arch = "wasm32"))]
-    shift_used_with_other: bool,
-    #[cfg(not(target_arch = "wasm32"))]
-    last_shift_tap_at: f64,
 }
 
 fn load_wallpaper_texture(ctx: &egui::Context) -> Option<egui::TextureHandle> {
@@ -159,12 +135,20 @@ fn load_wallpaper_texture(ctx: &egui::Context) -> Option<egui::TextureHandle> {
 
 impl KaageApp {
     fn new(cc: &eframe::CreationContext<'_>, ws_url: &str) -> Self {
-        configure_fonts(&cc.egui_ctx);
-        let theme_mode = ThemeMode::ObsidianAmber;
-        apply_theme(&cc.egui_ctx, theme_mode);
+        let saved = load_session();
+        let (theme_mode, show_wallpaper) = if let Some(ref s) = saved {
+            let us = s.to_user_settings();
+            apply_user_settings(&cc.egui_ctx, us, true);
+            (us.theme_mode, s.show_wallpaper)
+        } else {
+            configure_fonts(&cc.egui_ctx);
+            let mode = ThemeMode::ObsidianAmber;
+            apply_theme(&cc.egui_ctx, mode);
+            (mode, true)
+        };
         let wallpaper = load_wallpaper_texture(&cc.egui_ctx);
         #[cfg(target_arch = "wasm32")]
-        install_wasm_shift_double_tap_listener(cc.egui_ctx.clone());
+        install_wasm_palette_shortcut_listener(cc.egui_ctx.clone());
 
         let ctx_clone = cc.egui_ctx.clone();
         let (ws_tx, ws_rx) = ewebsock::connect_with_wakeup(
@@ -174,72 +158,99 @@ impl KaageApp {
         )
         .expect("Failed to open WebSocket connection");
 
-        let tracker = BeTrackerSidebar::new();
-        let stage_x = tracker.width() + 24.0;
-
+        let mut tracker = BeTrackerSidebar::new();
         let mut wm = BeWindowManager::new();
+        let mut next_pty_id = 1u32;
+        let mut next_tracker_pane_id = 1u64;
+        let mut pending_startup_msgs = Vec::new();
 
-        // Workspace 0 ("1: Ops"): Systemd Services + Terminal shell (BSP tiled side-by-side)
-        let ops_gid = wm.open_window_in_workspace(
-            0,
-            false,
-            "Systemd Services".into(),
-            PaneKind::SystemdInspector {
-                filter: String::new(),
-                scope_filter: ScopeFilter::All,
-                state_filter: StateFilter::All,
-            },
-            Pos2::new(stage_x, TOPBAR_HEIGHT + 12.0),
-            Vec2::new(720.0, 420.0),
-        );
-        wm.add_tab_to_group(
-            ops_gid,
-            "Tailscale Services".into(),
-            PaneKind::TailscaleServices {
-                filter: String::new(),
-                local_port_input: String::new(),
-                https_port_input: String::new(),
-            },
-        );
-        wm.add_tab_to_group(ops_gid, "HTTP Ports".into(), PaneKind::HttpPorts { filter: String::new() });
-        wm.add_tab_to_group(ops_gid, "Tailscale".into(), PaneKind::TailscalePanel);
+        if let Some(ref s) = saved
+            && !s.groups.is_empty()
+        {
+            tracker.visible = s.tracker_visible;
+            tracker.wide = s.tracker_wide;
+            pending_startup_msgs = s.restore_wm(&mut wm, &mut next_pty_id, &mut next_tracker_pane_id);
+        } else {
+            let stage_x = tracker.width() + 24.0;
 
-        let initial_pty = 1;
-        wm.open_window_in_workspace(
-            0,
-            false,
-            "Terminal — shell".into(),
-            PaneKind::Terminal(TerminalPane::new(initial_pty, 80, 24)),
-            Pos2::new(stage_x + 24.0, TOPBAR_HEIGHT + 464.0),
-            Vec2::new(700.0, 320.0),
-        );
+            // Workspace 0 ("1: Ops"): Systemd Services + Terminal shell (BSP tiled side-by-side)
+            let ops_gid = wm.open_window_in_workspace(
+                0,
+                false,
+                "Systemd Services".into(),
+                PaneKind::SystemdInspector {
+                    filter: String::new(),
+                    scope_filter: ScopeFilter::All,
+                    state_filter: StateFilter::All,
+                },
+                Pos2::new(stage_x, TOPBAR_HEIGHT + 12.0),
+                Vec2::new(720.0, 420.0),
+            );
+            wm.add_tab_to_group(
+                ops_gid,
+                "Tailscale Services".into(),
+                PaneKind::TailscaleServices {
+                    filter: String::new(),
+                    local_port_input: String::new(),
+                    https_port_input: String::new(),
+                },
+            );
+            wm.add_tab_to_group(ops_gid, "HTTP Ports".into(), PaneKind::HttpPorts { filter: String::new() });
+            wm.add_tab_to_group(ops_gid, "Tailscale".into(), PaneKind::TailscalePanel);
 
-        // Workspace 1 ("2: AI"): AI Jobs + GPU/CPU/Mem Monitor
-        wm.open_window_in_workspace(
-            1,
-            false,
-            "AI Jobs".into(),
-            PaneKind::AiJobs,
-            Pos2::new(stage_x, TOPBAR_HEIGHT + 12.0),
-            Vec2::new(620.0, 420.0),
-        );
-        wm.open_window_in_workspace(
-            1,
-            false,
-            "GPU / CPU / Mem".into(),
-            PaneKind::SystemMonitor,
-            Pos2::new(stage_x, TOPBAR_HEIGHT + 12.0),
-            Vec2::new(620.0, 420.0),
-        );
+            let initial_pty = next_pty_id;
+            next_pty_id += 1;
+            wm.open_window_in_workspace(
+                0,
+                false,
+                "Terminal — shell".into(),
+                PaneKind::Terminal(TerminalPane::new(initial_pty, 80, 24)),
+                Pos2::new(stage_x + 24.0, TOPBAR_HEIGHT + 464.0),
+                Vec2::new(700.0, 320.0),
+            );
+            pending_startup_msgs.push(ClientMsg::SpawnPty {
+                session_id: initial_pty,
+                cols: 80,
+                rows: 24,
+                cmd: None,
+            });
 
-        wm.active_workspace = 0;
+            // Workspace 1 ("2: AI"): AI Jobs + GPU/CPU/Mem Monitor
+            wm.open_window_in_workspace(
+                1,
+                false,
+                "AI Jobs".into(),
+                PaneKind::AiJobs,
+                Pos2::new(stage_x, TOPBAR_HEIGHT + 12.0),
+                Vec2::new(620.0, 420.0),
+            );
+            wm.open_window_in_workspace(
+                1,
+                false,
+                "GPU / CPU / Mem".into(),
+                PaneKind::SystemMonitor,
+                Pos2::new(stage_x, TOPBAR_HEIGHT + 12.0),
+                Vec2::new(620.0, 420.0),
+            );
+
+            wm.active_workspace = 0;
+        }
+
+        let initial_saved = SavedSession::capture(
+            &wm,
+            tracker.visible,
+            tracker.wide,
+            show_wallpaper,
+            user_settings(),
+        );
+        let last_saved_session = postcard::to_allocvec(&initial_saved).unwrap_or_default();
 
         Self {
             ws_tx,
             ws_rx,
             connected: false,
             theme_mode,
-            show_wallpaper: true,
+            show_wallpaper,
             wallpaper,
             wm,
             deskbar: BeDeskbar::new(),
@@ -255,16 +266,13 @@ impl KaageApp {
             units: Vec::new(),
             selected_unit_status: None,
             containers: Vec::new(),
-            next_pty_id: 2,
-            next_tracker_pane_id: 1,
+            next_pty_id,
+            next_tracker_pane_id,
+            pending_startup_msgs,
+            last_saved_session,
+            last_session_save_at: 0.0,
             pending_undo: None,
             toast: None,
-            #[cfg(not(target_arch = "wasm32"))]
-            shift_was_down: false,
-            #[cfg(not(target_arch = "wasm32"))]
-            shift_used_with_other: false,
-            #[cfg(not(target_arch = "wasm32"))]
-            last_shift_tap_at: -10.0,
         }
     }
 
@@ -300,12 +308,10 @@ impl KaageApp {
         self.send_client_msg(ClientMsg::ListContainers);
         self.send_client_msg(ClientMsg::RefreshDashboard);
         self.send_client_msg(ClientMsg::GetAppDataState);
-        self.send_client_msg(ClientMsg::SpawnPty {
-            session_id: 1,
-            cols: 80,
-            rows: 24,
-            cmd: None,
-        });
+        let startup = std::mem::take(&mut self.pending_startup_msgs);
+        for msg in startup {
+            self.send_client_msg(msg);
+        }
     }
 
     fn stage_origin(&self, offset_x: f32, offset_y: f32) -> Pos2 {
@@ -557,48 +563,29 @@ impl eframe::App for KaageApp {
         let p = active_palette();
         ctx.request_repaint_after(std::time::Duration::from_secs(1));
 
-        // Global Shift×2 (double-tap Shift) Command Palette shortcut — zero browser/terminal conflicts.
+        // Global Command Palette shortcut: Cmd+/ (macOS) or Ctrl+` (Linux/Windows).
         #[cfg(target_arch = "wasm32")]
         {
-            if WASM_SHIFT_DOUBLE_TAP.swap(false, std::sync::atomic::Ordering::Relaxed) {
+            if WASM_PALETTE_TRIGGER.swap(false, std::sync::atomic::Ordering::Relaxed) {
                 self.cmd_palette.toggle();
             }
         }
         #[cfg(not(target_arch = "wasm32"))]
         {
-            let (shift_down, other_activity) = ctx.input(|i| {
-                let shift = i.modifiers.shift;
-                let other_mod =
-                    i.modifiers.ctrl || i.modifiers.alt || i.modifiers.mac_cmd || i.modifiers.command;
-                let key_or_text = i.events.iter().any(|e| {
-                    matches!(
-                        e,
-                        egui::Event::Text(_) | egui::Event::Key { pressed: true, .. }
-                    )
-                });
-                (shift, other_mod || key_or_text)
+            let triggered = ctx.input(|i| {
+                let cmd_slash = i.modifiers.mac_cmd
+                    && !i.modifiers.ctrl
+                    && !i.modifiers.alt
+                    && i.key_pressed(egui::Key::Slash);
+                let ctrl_backtick = i.modifiers.ctrl
+                    && !i.modifiers.mac_cmd
+                    && !i.modifiers.alt
+                    && i.key_pressed(egui::Key::Backtick);
+                cmd_slash || ctrl_backtick
             });
-            if shift_down && !self.shift_was_down {
-                self.shift_used_with_other = false;
+            if triggered {
+                self.cmd_palette.toggle();
             }
-            if shift_down && other_activity {
-                self.shift_used_with_other = true;
-                self.last_shift_tap_at = -10.0;
-            }
-            if !shift_down && self.shift_was_down {
-                if !self.shift_used_with_other {
-                    if now - self.last_shift_tap_at <= 0.45 {
-                        self.cmd_palette.toggle();
-                        self.last_shift_tap_at = -10.0;
-                    } else {
-                        self.last_shift_tap_at = now;
-                    }
-                }
-                self.shift_used_with_other = false;
-            } else if !shift_down && other_activity {
-                self.last_shift_tap_at = -10.0;
-            }
-            self.shift_was_down = shift_down;
         }
 
         while let Some(event) = self.ws_rx.try_recv() {
@@ -1064,6 +1051,25 @@ impl eframe::App for KaageApp {
         if let Some(undo_msg) = trigger_undo {
             self.toast = None;
             self.send_client_msg(undo_msg);
+        }
+
+        // Persist window layout, active workspace, sidebar, and user settings to browser localStorage
+        // (throttled to 0.5s and only when state actually changes).
+        if now - self.last_session_save_at >= 0.5 {
+            self.last_session_save_at = now;
+            let snap = SavedSession::capture(
+                &self.wm,
+                self.tracker.visible,
+                self.tracker.wide,
+                self.show_wallpaper,
+                user_settings(),
+            );
+            if let Ok(bytes) = postcard::to_allocvec(&snap)
+                && bytes != self.last_saved_session
+            {
+                save_session_bytes(&bytes);
+                self.last_saved_session = bytes;
+            }
         }
     }
 }

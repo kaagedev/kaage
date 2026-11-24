@@ -198,8 +198,8 @@ fn render_kaage_shortcuts(ui: &mut Ui) {
         ui,
         &[
             (
-                "Shift × 2",
-                "Double-tap Shift to open the global Command HUD (zero browser/terminal conflicts; launch apps, control services, switch workspaces, toggle theme).",
+                "Cmd+/  |  Ctrl+`",
+                "Open the global Command HUD (Cmd+/ on macOS, Ctrl+Backtick on Linux/Windows; zero browser conflicts).",
             ),
             ("Alt+1 .. Alt+4", "Switch virtual workspaces: 1: Ops, 2: AI, 3: Files, 4: Logs."),
             ("Alt+H / J / K / L", "Cycle focus across tiled panes (or Alt+Left/Right)."),

@@ -3,6 +3,24 @@ use crate::theme::palette;
 use egui::{CornerRadius, Id, Key, Pos2, Rect, RichText, ScrollArea, Sense, Stroke, Vec2};
 use kaage_proto::{ContainerAction, ContainerInfo, SystemdUnitInfo, UnitAction, UnitScope};
 
+pub fn is_macos() -> bool {
+    #[cfg(target_arch = "wasm32")]
+    {
+        web_sys::window()
+            .and_then(|w| w.navigator().user_agent().ok())
+            .map(|ua| ua.contains("Mac"))
+            .unwrap_or(false)
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        cfg!(target_os = "macos")
+    }
+}
+
+pub fn palette_shortcut_badge() -> &'static str {
+    if is_macos() { "⌘/" } else { "⌃`" }
+}
+
 pub enum PaletteAction {
     SwitchWorkspace(usize),
     OpenVitals,
@@ -136,7 +154,7 @@ impl CommandPalette {
 
                         ui.horizontal(|ui| {
                             ui.label(
-                                RichText::new("⇧⇧")
+                                RichText::new(palette_shortcut_badge())
                                     .monospace()
                                     .strong()
                                     .color(p.accent),
