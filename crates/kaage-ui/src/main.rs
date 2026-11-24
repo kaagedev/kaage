@@ -15,7 +15,7 @@ mod wm;
 
 use deskbar::{BeDeskbar, DeskbarAction};
 use desktop_icons::{DesktopIconAction, show_desktop_icons};
-use eframe::egui::{self, Color32, CornerRadius, Id, Key, Pos2, Rect, Stroke, Vec2};
+use eframe::egui::{self, Color32, CornerRadius, Id, Pos2, Rect, Stroke, Vec2};
 use ewebsock::{WsEvent, WsMessage, WsReceiver, WsSender};
 use file_tracker::TrackerWindow;
 use help::HelpWindow;
@@ -69,6 +69,9 @@ struct KaageApp {
     next_tracker_pane_id: u64,
     pending_undo: Option<ClientMsg>,
     toast: Option<ToastNotice>,
+    shift_was_down: bool,
+    shift_used_with_other: bool,
+    last_shift_tap_at: f64,
 }
 
 fn load_wallpaper_texture(ctx: &egui::Context) -> Option<egui::TextureHandle> {
@@ -183,6 +186,9 @@ impl KaageApp {
             next_tracker_pane_id: 1,
             pending_undo: None,
             toast: None,
+            shift_was_down: false,
+            shift_used_with_other: false,
+            last_shift_tap_at: -10.0,
         }
     }
 
@@ -452,11 +458,39 @@ impl eframe::App for KaageApp {
         let p = active_palette();
         ctx.request_repaint_after(std::time::Duration::from_secs(1));
 
-        // Global Ctrl+K / Cmd+K Command Palette shortcut
-        let cmd_k = ctx.input(|i| (i.modifiers.ctrl || i.modifiers.mac_cmd) && i.key_pressed(Key::K));
-        if cmd_k {
-            self.cmd_palette.toggle();
+        // Global Shift×2 (double-tap Shift) Command Palette shortcut — zero browser/terminal conflicts.
+        let (shift_down, other_activity) = ctx.input(|i| {
+            let shift = i.modifiers.shift;
+            let other_mod = i.modifiers.ctrl || i.modifiers.alt || i.modifiers.mac_cmd || i.modifiers.command;
+            let key_or_text = i.events.iter().any(|e| {
+                matches!(
+                    e,
+                    egui::Event::Text(_) | egui::Event::Key { pressed: true, .. }
+                )
+            });
+            (shift, other_mod || key_or_text)
+        });
+        if shift_down && !self.shift_was_down {
+            self.shift_used_with_other = false;
         }
+        if shift_down && other_activity {
+            self.shift_used_with_other = true;
+            self.last_shift_tap_at = -10.0;
+        }
+        if !shift_down && self.shift_was_down {
+            if !self.shift_used_with_other {
+                if now - self.last_shift_tap_at <= 0.35 {
+                    self.cmd_palette.toggle();
+                    self.last_shift_tap_at = -10.0;
+                } else {
+                    self.last_shift_tap_at = now;
+                }
+            }
+            self.shift_used_with_other = false;
+        } else if !shift_down && other_activity {
+            self.last_shift_tap_at = -10.0;
+        }
+        self.shift_was_down = shift_down;
 
         while let Some(event) = self.ws_rx.try_recv() {
             match event {

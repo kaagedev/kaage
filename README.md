@@ -8,8 +8,15 @@ A single-user, BeOS-inspired browser desktop environment built in Rust for inspe
 
 - [`crates/kaage-proto`](crates/kaage-proto) — Shared `postcard` wire protocol (`ClientMsg`, `ServerMsg`, `SystemdUnitInfo`, `ContainerInfo`, `HostMetrics`).
 - [`crates/kaaged`](crates/kaaged) — Linux host daemon (`axum` + `tokio`, `zbus` system & user D-Bus, `bollard` Docker/Podman, `portable-pty`, `sysinfo`, `Tailscale-User-Login` auth).
-- [`crates/kaage-ui`](crates/kaage-ui) — BeOS Stack & Tile webtop (`eframe`/`egui` + `ewebsock` + VT100/xterm-256color terminal renderer), compiles to both `wasm32-unknown-unknown` and native desktop.
+- [`crates/kaage-ui`](crates/kaage-ui) — Mission-Control Webtop (`eframe`/`egui` + `ewebsock`, IBM Plex Sans/Mono typography, `libghostty-vt` optional native terminal backend + pure-Rust `vt100` WASM fallback), compiles to both `wasm32-unknown-unknown` and native desktop.
 - [`flake.nix`](flake.nix) + [`nix/`](nix) — Reproducible Nix packages (`kaaged`, `kaage-ui`, `kaage-ui-native`, `kaage`), NixOS module (`nixosModules.default`), and Home Manager module (`homeManagerModules.default`).
+
+## Terminal Engine (`libghostty-vt` & Kitty Keyboard Protocol)
+
+`kaage-ui` is designed around [`libghostty-vt`](https://ghostty.org) (`ghostty-vt 0.8`, available via the `ghostty` Cargo feature on native targets) with a pure-Rust `vt100` fallback for zero-Zig offline Nix WASM builds:
+
+- **High-fidelity VT emulation**: Full 24-bit truecolor, Unicode grapheme clustering, synchronized output (DEC mode 2026, eliminating TUI flicker), and low-latency GPU-accelerated canvas rendering without `xterm.js` DOM overhead.
+- **Kitty Keyboard Protocol (`CSI u`)**: Supported by `libghostty-vt`. Legacy VT100/xterm collapses distinct chords into identical control bytes (`Ctrl+I` = `Tab`, `Ctrl+M` = `Enter`, `Ctrl+[` = `Esc`) and cannot represent modified keys like `Shift+Enter` or `Ctrl+Shift+letter`. The Kitty Keyboard Protocol transmits unambiguous keycodes, modifier bitmasks, and press/repeat/release events — critical for modern editors and multiplexers (**Neovim, Helix, tmux, Zellij**) and for reliable key handling in browser-hosted terminals.
 
 ## Deploying on NixOS (`btbytes/nixos-dotfiles` / `aihole`)
 
@@ -106,3 +113,7 @@ cargo run -p kaage-ui
 | `KAAGE_DIST_DIR` | `dist` | Static directory serving the built WASM webtop |
 | `KAAGE_ALLOWED_USER` | *(unset)* | Required `Tailscale-User-Login` header value |
 | `KAAGE_CONTAINER_CLI` | `docker` | Container CLI binary used by the `Shell` button (e.g. `podman`) |
+
+## License
+
+MIT License — Copyright © 2026 [Pradeep Gowda](https://linkedin.com/in/btbytes). See [`LICENSE`](LICENSE) for details.

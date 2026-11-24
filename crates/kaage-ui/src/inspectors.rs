@@ -117,12 +117,13 @@ pub fn render_systemd_inspector(
     let list_max_height = if selected_status.is_some() {
         (ui.available_height() - 185.0).max(90.0)
     } else {
-        ui.available_height()
+        ui.available_height().max(80.0)
     };
 
     ScrollArea::vertical()
         .id_salt("systemd_units_list")
         .max_height(list_max_height)
+        .auto_shrink([false, false])
         .show(ui, |ui| {
             let mut shown = 0usize;
             for unit in units {

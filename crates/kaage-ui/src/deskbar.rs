@@ -68,11 +68,11 @@ impl BeDeskbar {
                 let btn_y = bar_rect.min.y + 3.0;
                 let btn_h = TOPBAR_HEIGHT - 6.0;
 
-                // 1) Crow "kaage ⌘K" Command HUD Trigger
+                // 1) Crow "kaage ⇧⇧" Command HUD Trigger
                 let cmd_rect = Rect::from_min_size(Pos2::new(left_x, btn_y), Vec2::new(96.0, btn_h));
                 let cmd_resp = ui
                     .interact(cmd_rect, Id::unique("topbar_cmd_btn"), Sense::click())
-                    .on_hover_text("Open Command Palette (Ctrl+K / Cmd+K)");
+                    .on_hover_text("Open Command Palette (Shift × 2)");
                 painter.rect_filled(
                     cmd_rect,
                     CornerRadius::ZERO,
@@ -93,7 +93,7 @@ impl BeDeskbar {
                 painter.text(
                     Pos2::new(cmd_rect.max.x - 6.0, cmd_rect.center().y),
                     egui::Align2::RIGHT_CENTER,
-                    "⌘K",
+                    "⇧⇧",
                     egui::FontId::monospace(10.0),
                     p.accent,
                 );

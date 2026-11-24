@@ -57,10 +57,33 @@ impl HelpWindow {
 
         ScrollArea::vertical()
             .id_salt("kaage_help_scroll")
-            .show(ui, |ui| match self.page {
-                HelpPage::BrowserVimKeys => render_browser_vim_keys(ui),
-                HelpPage::KaageShortcuts => render_kaage_shortcuts(ui),
-                HelpPage::AppsAndApis => render_apps_and_apis(ui),
+            .show(ui, |ui| {
+                match self.page {
+                    HelpPage::BrowserVimKeys => render_browser_vim_keys(ui),
+                    HelpPage::KaageShortcuts => render_kaage_shortcuts(ui),
+                    HelpPage::AppsAndApis => render_apps_and_apis(ui),
+                }
+                ui.add_space(10.0);
+                ui.separator();
+                ui.horizontal_wrapped(|ui| {
+                    ui.label(
+                        RichText::new("Copyright © 2026")
+                            .size(11.0)
+                            .color(p.text_muted),
+                    );
+                    ui.hyperlink_to(
+                        RichText::new("Pradeep Gowda")
+                            .strong()
+                            .size(11.0)
+                            .color(p.accent),
+                        "https://linkedin.com/in/btbytes",
+                    );
+                    ui.label(
+                        RichText::new("· MIT License")
+                            .size(11.0)
+                            .color(p.text_muted),
+                    );
+                });
             });
     }
 }
@@ -138,6 +161,35 @@ fn render_browser_vim_keys(ui: &mut Ui) {
         ui,
         "Set 'set ttimeoutlen=10' in Vim for instant Escape response over Tailscale.",
     );
+
+    ui.add_space(10.0);
+    section_title(ui, "TERMINAL ENGINE: LIBGHOSTTY-VT & KITTY KEYBOARD PROTOCOL");
+    ui.label(
+        RichText::new(
+            "kaage's terminal architecture targets libghostty-vt (optional native 'ghostty' feature, ghostty-vt 0.8) \
+             with a pure-Rust vt100 fallback for zero-toolchain offline Nix WASM builds.",
+        )
+        .size(11.5)
+        .color(p.text_muted),
+    );
+    ui.add_space(4.0);
+    key_table(
+        ui,
+        &[
+            (
+                "libghostty-vt",
+                "Battle-tested VT emulator extracted from Ghostty: full 24-bit truecolor, Unicode grapheme clusters, synchronized output (DEC 2026), and fast scrollback without xterm.js DOM overhead.",
+            ),
+            (
+                "Kitty Keyboard Protocol",
+                "Supported by libghostty-vt (CSI u encoding). Unlike legacy VT100 where Ctrl+I == Tab, Ctrl+M == Enter, and Ctrl+[ == Esc, Kitty protocol encodes exact key + modifier + press/release state.",
+            ),
+            (
+                "Why it matters",
+                "Unlocks unambiguous shortcuts in Neovim, Helix, tmux, and Zellij (e.g. Shift+Enter, Ctrl+Enter, Ctrl+Shift+letter, and clean Esc vs Ctrl+[ handling) even over a browser/Tailscale session.",
+            ),
+        ],
+    );
 }
 
 fn render_kaage_shortcuts(ui: &mut Ui) {
@@ -146,8 +198,8 @@ fn render_kaage_shortcuts(ui: &mut Ui) {
         ui,
         &[
             (
-                "Ctrl+K / Cmd+K",
-                "Open the global Command HUD (launch apps, restart/stop/logs services, switch workspaces, toggle theme).",
+                "Shift × 2",
+                "Double-tap Shift to open the global Command HUD (zero browser/terminal conflicts; launch apps, control services, switch workspaces, toggle theme).",
             ),
             ("Alt+1 .. Alt+4", "Switch virtual workspaces: 1: Ops, 2: AI, 3: Files, 4: Logs."),
             ("Alt+H / J / K / L", "Cycle focus across tiled panes (or Alt+Left/Right)."),

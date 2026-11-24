@@ -82,6 +82,12 @@ impl BeTrackerSidebar {
             .fixed_pos(origin)
             .order(egui::Order::Middle)
             .show(ctx, |ui| {
+                // Register sidebar footprint with the Area so ScrollArea receives wheel events.
+                ui.expand_to_include_rect(Rect::from_min_size(
+                    origin,
+                    Vec2::new(width, tab_h + body_h),
+                ));
+
                 // Header Tab for Tracker Sidebar
                 let tab_w = 152.0_f32.min(width);
                 let tab_rect = Rect::from_min_size(origin, Vec2::new(tab_w, tab_h + 1.0));

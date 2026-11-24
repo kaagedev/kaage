@@ -373,6 +373,18 @@ impl BeWindowManager {
                 .fixed_pos(group.pos)
                 .order(area_order)
                 .show(ctx, |ui| {
+                    // Register the full window footprint with the Area so egui's layer hit-testing
+                    // (ScrollArea mouse-wheel, hover, and pointer routing) recognizes this window.
+                    let footprint = if group.shaded {
+                        Rect::from_min_size(group.pos, Vec2::new(group.size.x, tab_height + 2.0))
+                    } else {
+                        Rect::from_min_size(
+                            group.pos,
+                            Vec2::new(group.size.x, tab_height + group.size.y),
+                        )
+                    };
+                    ui.expand_to_include_rect(footprint);
+
                     let mut cursor_x = group.pos.x + group.tab_offset;
 
                     for (idx, tab) in group.tabs.iter().enumerate() {
@@ -555,6 +567,7 @@ impl BeWindowManager {
                                 .max_rect(inner_rect)
                                 .layout(egui::Layout::top_down(egui::Align::Min)),
                         );
+                        child_ui.set_clip_rect(inner_rect);
 
                         if let Some(active) = group.tabs.get_mut(group.active_tab) {
                             match &mut active.kind {

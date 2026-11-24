@@ -135,7 +135,7 @@ impl CommandPalette {
 
                         ui.horizontal(|ui| {
                             ui.label(
-                                RichText::new("⌘K")
+                                RichText::new("⇧⇧")
                                     .monospace()
                                     .strong()
                                     .color(p.accent),
