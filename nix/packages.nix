@@ -103,7 +103,8 @@ let
         --enable-reference-types \
         -o "$out/kaage-ui_bg.opt.wasm" "$out/kaage-ui_bg.wasm"
       mv "$out/kaage-ui_bg.opt.wasm" "$out/kaage-ui_bg.wasm"
-      sed 's|<link data-trunk[^>]*>|<script type="module">import init from "./kaage-ui.js"; init();</script>|' \
+      WASM_HASH=$(sha256sum "$out/kaage-ui_bg.wasm" | cut -c1-12)
+      sed "s|<link data-trunk[^>]*>|<script type=\"module\">import init from \"./kaage-ui.js?v=$WASM_HASH\"; init({ module_or_path: \"./kaage-ui_bg.wasm?v=$WASM_HASH\" });</script>|" \
         index.html > "$out/index.html"
       runHook postInstall
     '';

@@ -83,6 +83,16 @@ fn install_wasm_palette_shortcut_listener(ctx: egui::Context) {
     on_keydown.forget();
 }
 
+#[cfg(target_arch = "wasm32")]
+fn hide_wasm_loader() {
+    if let Some(window) = web_sys::window()
+        && let Some(doc) = window.document()
+        && let Some(el) = doc.get_element_by_id("kaage_loader")
+    {
+        let _ = el.set_attribute("class", "hidden");
+    }
+}
+
 struct ToastNotice {
     ok: bool,
     text: String,
@@ -148,7 +158,10 @@ impl KaageApp {
         };
         let wallpaper = load_wallpaper_texture(&cc.egui_ctx);
         #[cfg(target_arch = "wasm32")]
-        install_wasm_palette_shortcut_listener(cc.egui_ctx.clone());
+        {
+            install_wasm_palette_shortcut_listener(cc.egui_ctx.clone());
+            hide_wasm_loader();
+        }
 
         let ctx_clone = cc.egui_ctx.clone();
         let (ws_tx, ws_rx) = ewebsock::connect_with_wakeup(
@@ -1105,6 +1118,7 @@ fn main() {
             .await;
 
         if let Err(err) = start_result {
+            hide_wasm_loader();
             web_sys::console::error_1(&err);
             if let Some(el) = document.get_element_by_id("kaage_error") {
                 let _ = el.set_attribute("style", "display: block;");

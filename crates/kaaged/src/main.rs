@@ -7,11 +7,12 @@ mod vitals;
 use axum::{
     Json, Router,
     extract::{
-        Path as AxumPath, Query, State,
+        Path as AxumPath, Query, Request, State,
         ws::{Message, WebSocket, WebSocketUpgrade},
     },
-    http::{HeaderMap, StatusCode},
-    response::IntoResponse,
+    http::{HeaderMap, HeaderValue, StatusCode, header},
+    middleware::{self, Next},
+    response::{IntoResponse, Response},
     routing::{get, post},
 };
 use bollard::{
@@ -90,6 +91,21 @@ struct UnitControlResponse {
     status: Option<SystemdUnitStatus>,
 }
 
+async fn no_cache_ui_middleware(req: Request, next: Next) -> Response {
+    let path = req.uri().path().to_string();
+    let mut res = next.run(req).await;
+    if !path.starts_with("/api/") && !path.starts_with("/ws") {
+        let headers = res.headers_mut();
+        headers.insert(
+            header::CACHE_CONTROL,
+            HeaderValue::from_static("no-cache, no-store, must-revalidate"),
+        );
+        headers.insert(header::PRAGMA, HeaderValue::from_static("no-cache"));
+        headers.insert(header::EXPIRES, HeaderValue::from_static("0"));
+    }
+    res
+}
+
 fn build_router(state: Arc<AppState>) -> Router {
     let dist_dir = state.dist_dir.clone();
     Router::new()
@@ -107,6 +123,7 @@ fn build_router(state: Arc<AppState>) -> Router {
         .route("/api/v1/containers", get(http_list_containers))
         .route("/api/v1/files/download", get(files::http_download_file))
         .fallback_service(ServeDir::new(dist_dir))
+        .layer(middleware::from_fn(no_cache_ui_middleware))
         .with_state(state)
 }
 
