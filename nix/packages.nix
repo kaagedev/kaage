@@ -178,7 +178,18 @@ let
     nativeBuildInputs = [ pkgs.makeWrapper ];
     postBuild = ''
       wrapProgram "$out/bin/kaaged" \
-        --set-default KAAGE_DIST_DIR "${kaage-ui}"
+        --set-default KAAGE_DIST_DIR "${kaage-ui}" \
+        --suffix PATH : "${
+          lib.makeBinPath (
+            [
+              pkgs.bashInteractive
+              pkgs.coreutils
+              pkgs.gnutar
+              pkgs.gzip
+            ]
+            ++ lib.optionals pkgs.stdenv.hostPlatform.isLinux [ pkgs.iproute2 ]
+          )
+        }"
     '';
     meta = kaaged.meta;
   };

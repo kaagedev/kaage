@@ -18,42 +18,92 @@ A single-user, BeOS-inspired browser desktop environment built in Rust for inspe
 - **High-fidelity VT emulation**: Full 24-bit truecolor, Unicode grapheme clustering, synchronized output (DEC mode 2026, eliminating TUI flicker), and low-latency GPU-accelerated canvas rendering without `xterm.js` DOM overhead.
 - **Kitty Keyboard Protocol (`CSI u`)**: Supported by `libghostty-vt`. Legacy VT100/xterm collapses distinct chords into identical control bytes (`Ctrl+I` = `Tab`, `Ctrl+M` = `Enter`, `Ctrl+[` = `Esc`) and cannot represent modified keys like `Shift+Enter` or `Ctrl+Shift+letter`. The Kitty Keyboard Protocol transmits unambiguous keycodes, modifier bitmasks, and press/repeat/release events — critical for modern editors and multiplexers (**Neovim, Helix, tmux, Zellij**) and for reliable key handling in browser-hosted terminals.
 
-## Deploying on NixOS (`btbytes/nixos-dotfiles` / `aihole`)
+## Quick Install (Bare NixOS)
 
-### Option A (Recommended): NixOS Module (`services.kaage`)
+Works on a fresh NixOS machine with nothing else installed (no Rust, Docker, GPU drivers, or Tailscale required — and works even before Nix flakes are enabled):
+
+### 1. One-line User Install (Recommended for Quick Setup)
+
+Installs `kaage` into your Nix profile, creates `~/appdata` (`KAAGE_APPDATA`), enables `kaaged.service` as a `systemd --user` service, and automatically configures `tailscale serve` if Tailscale is running:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/kaagedev/kaage/main/install.sh | bash
+```
+
+Pass custom options after `bash -s --`:
+
+```bash
+# Custom port, appdata directory, and Tailscale user allowlist
+curl -fsSL https://raw.githubusercontent.com/kaagedev/kaage/main/install.sh | \
+  bash -s -- --port 9090 --appdata ~/appdata --allowed-user you@example.com
+
+# Skip automatic Tailscale Serve setup
+curl -fsSL https://raw.githubusercontent.com/kaagedev/kaage/main/install.sh | \
+  bash -s -- --no-tailscale-serve
+
+# Uninstall (preserves ~/appdata)
+curl -fsSL https://raw.githubusercontent.com/kaagedev/kaage/main/install.sh | \
+  bash -s -- --uninstall
+```
+
+Once installed:
+- Open **`http://127.0.0.1:9090`** (or **`https://<your-node>.ts.net:9090`** over Tailscale)
+- Check status/logs: `systemctl --user status kaaged.service` / `journalctl --user -u kaaged.service -f`
+
+### 2. Ephemeral Run (Try Without Installing)
+
+```bash
+nix --extra-experimental-features 'nix-command flakes' run github:kaagedev/kaage
+```
+
+### 3. Generate a Declarative NixOS Module Snippet
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/kaagedev/kaage/main/install.sh | \
+  bash -s -- --mode nixos --write-module ./kaage.nix
+```
+
+## Deploying on NixOS (Flake Overlay & Module)
+
+### Option A (Recommended): Flake Overlay + NixOS Module (`services.kaage`)
 
 Runs `kaaged` at boot as your user (`my.username`), installs a scoped Polkit rule so you can start/stop/restart system units from the UI without interactive prompts, inspects both system **and** user systemd services (`acedop`, `comfyui`, `unsloth`, `emacs`, `llama-cpp`, etc.), and declaratively exposes kaage via `tailscale serve`.
 
-1. **Add `kaage` to `flake.nix` inputs** (use `path:/home/pradeep/projects/kaage` while iterating locally, or `github:btbytes/kaage` once pushed):
+1. **Add `kaage` to `flake.nix` inputs**:
 
 ```nix
 inputs = {
   # ...existing inputs...
   kaage = {
-    url = "github:btbytes/kaage"; # or "path:/home/pradeep/projects/kaage"
+    url = "github:kaagedev/kaage"; # or "path:/home/pradeep/projects/kaage"
     inputs.nixpkgs.follows = "nixpkgs";
   };
 };
 ```
 
-2. **Import the NixOS module in `flake.nix`** under `nixosConfigurations.aihole.modules`:
+2. **Apply the Flake Overlay and NixOS module in `flake.nix`** under `nixosConfigurations.<host>.modules`:
 
 ```nix
 modules = [
   ./hardware-configuration.nix
   ./configuration.nix
+  { nixpkgs.overlays = [ inputs.kaage.overlays.default ]; }
   inputs.kaage.nixosModules.default
   # ...home-manager module...
 ];
 ```
+
+The overlay adds `pkgs.kaage`, `pkgs.kaaged`, `pkgs.kaage-ui`, and `pkgs.kaage-ui-native` to `pkgs`.
 
 3. **Enable `services.kaage` in `configuration.nix`** (accept `my` in the top-level args `{ config, pkgs, my, ... }:`):
 
 ```nix
 services.kaage = {
   enable = true;
+  package = pkgs.kaage;
   user = my.username;
   port = 9090;
+  appDataDir = "/home/${my.username}/appdata"; # sets KAAGE_APPDATA (default: ~/appdata)
   allowedUser = "pradeep@btbytes.com"; # match your Tailscale login
   tailscaleServe = {
     enable = true;
@@ -111,6 +161,7 @@ cargo run -p kaage-ui
 | :--- | :--- | :--- |
 | `KAAGE_BIND` | `127.0.0.1:9090` | HTTP/WebSocket listen address |
 | `KAAGE_DIST_DIR` | `dist` | Static directory serving the built WASM webtop |
+| `KAAGE_APPDATA` | `~/appdata` | Base directory for kaage & app data (`$KAAGE_APPDATA/<app>/`) |
 | `KAAGE_ALLOWED_USER` | *(unset)* | Required `Tailscale-User-Login` header value |
 | `KAAGE_CONTAINER_CLI` | `docker` | Container CLI binary used by the `Shell` button (e.g. `podman`) |
 

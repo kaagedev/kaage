@@ -63,6 +63,22 @@
         }
       );
 
+      apps = forAllSystems (
+        { kaagePkgs, ... }:
+        {
+          kaage = {
+            type = "app";
+            program = "${kaagePkgs.kaage}/bin/kaaged";
+            meta = kaagePkgs.kaage.meta;
+          };
+          default = {
+            type = "app";
+            program = "${kaagePkgs.kaage}/bin/kaaged";
+            meta = kaagePkgs.kaage.meta;
+          };
+        }
+      );
+
       devShells = forAllSystems (
         {
           pkgs,
@@ -85,18 +101,21 @@
         }
       );
 
-      overlays.default = final: prev:
-        let
-          system = prev.stdenv.hostPlatform.system;
-        in
-        {
-          inherit (self.packages.${system})
-            kaage
-            kaaged
-            kaage-ui
-            kaage-ui-native
-            ;
-        };
+      overlays = {
+        kaage = final: prev:
+          let
+            system = prev.stdenv.hostPlatform.system;
+          in
+          {
+            inherit (self.packages.${system})
+              kaage
+              kaaged
+              kaage-ui
+              kaage-ui-native
+              ;
+          };
+        default = self.overlays.kaage;
+      };
 
       nixosModules = {
         kaage = import ./nix/nixos-module.nix self;
