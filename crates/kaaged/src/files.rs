@@ -301,7 +301,7 @@ pub fn execute_file_op(op: FileOp) -> Result<(String, Option<PathBuf>, UndoRecor
             ))
         }
         FileOp::Trash { paths } => {
-            let trash_dir = expand_path("~/.local/share/kaage/trash");
+            let trash_dir = crate::appdata::kaage_app_dir().join("trash");
             fs::create_dir_all(&trash_dir).map_err(|e| e.to_string())?;
             let ts = std::time::SystemTime::now()
                 .duration_since(UNIX_EPOCH)
@@ -699,7 +699,7 @@ pub fn search_files(root: &str, pattern: &str, search_contents: bool) -> Vec<Fil
 }
 
 pub fn load_workspaces() -> Vec<WorkspaceDef> {
-    let dir = expand_path("~/.config/kaage/workspaces");
+    let dir = crate::appdata::kaage_app_dir().join("workspaces");
     let _ = fs::create_dir_all(&dir);
     let mut list = Vec::new();
     if let Ok(entries) = fs::read_dir(&dir) {
@@ -717,7 +717,7 @@ pub fn load_workspaces() -> Vec<WorkspaceDef> {
 }
 
 pub fn save_workspace(ws: &WorkspaceDef) -> Result<(), String> {
-    let dir = expand_path("~/.config/kaage/workspaces");
+    let dir = crate::appdata::kaage_app_dir().join("workspaces");
     fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     let safe_name: String = ws
         .name

@@ -70,6 +70,13 @@ in
       description = "Optional container CLI override (KAAGE_CONTAINER_CLI).";
     };
 
+    appDataDir = lib.mkOption {
+      type = lib.types.nullOr lib.types.str;
+      default = null;
+      example = "~/appdata";
+      description = "Optional base directory for kaage app data (sets KAAGE_APPDATA; defaults to ~/appdata).";
+    };
+
     installNativeClient = lib.mkOption {
       type = lib.types.bool;
       default = false;
@@ -99,7 +106,8 @@ in
             "PATH=${config.home.homeDirectory}/.nix-profile/bin:/etc/profiles/per-user/${config.home.username}/bin:/run/current-system/sw/bin:/run/wrappers/bin:${config.home.homeDirectory}/.local/bin"
           ]
           ++ lib.optional (cfg.allowedUser != null) "KAAGE_ALLOWED_USER=${cfg.allowedUser}"
-          ++ lib.optional (cfg.containerCli != null) "KAAGE_CONTAINER_CLI=${cfg.containerCli}";
+          ++ lib.optional (cfg.containerCli != null) "KAAGE_CONTAINER_CLI=${cfg.containerCli}"
+          ++ lib.optional (cfg.appDataDir != null) "KAAGE_APPDATA=${cfg.appDataDir}";
         ExecStart = lib.getExe cfg.package;
         Restart = "on-failure";
         RestartSec = 5;

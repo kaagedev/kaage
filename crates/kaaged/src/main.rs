@@ -1,3 +1,4 @@
+mod appdata;
 mod files;
 mod nixos;
 mod telemetry;
@@ -51,6 +52,7 @@ struct AppState {
     allow_system_backends: bool,
     docker: Option<Docker>,
     vitals: Arc<vitals::VitalsCollector>,
+    appdata: Arc<appdata::AppDataManager>,
     dist_dir: PathBuf,
 }
 
@@ -97,6 +99,7 @@ fn build_router(state: Arc<AppState>) -> Router {
         .route("/api/v1/metrics", get(http_metrics))
         .route("/api/v1/dashboard", get(http_dashboard))
         .route("/api/v1/vitals", get(http_vitals))
+        .route("/api/v1/appdata", get(http_appdata))
         .route("/api/v1/units", get(http_list_units))
         .route("/api/v1/units/{unit}", get(http_unit_status))
         .route("/api/v1/units/{unit}/status", get(http_unit_status))
@@ -171,6 +174,9 @@ async fn main() {
         tracing::warn!("KAAGE_ALLOWED_USER not set; running without Tailscale-User-Login check");
     }
 
+    let appdata = appdata::AppDataManager::new();
+    tracing::info!("KAAGE_APPDATA directory: {}", appdata.current_dir().display());
+
     let vitals = vitals::VitalsCollector::new();
     vitals.spawn_background();
 
@@ -182,6 +188,7 @@ async fn main() {
         allow_system_backends: true,
         docker,
         vitals,
+        appdata,
         dist_dir: dist_dir.clone(),
     });
 
@@ -315,6 +322,16 @@ async fn http_nixos(
         return (StatusCode::UNAUTHORIZED, "Unauthorized").into_response();
     }
     Json(state.nixos.clone()).into_response()
+}
+
+async fn http_appdata(
+    headers: HeaderMap,
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    if !check_auth(&headers, &state.allowed_user) {
+        return (StatusCode::UNAUTHORIZED, "Unauthorized").into_response();
+    }
+    Json(state.appdata.snapshot()).into_response()
 }
 
 #[derive(Deserialize, Default)]
@@ -667,6 +684,46 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
                 let snap = telemetry::collect_dashboard_snapshot().await;
                 let _ = out_tx.send(ServerMsg::Dashboard(snap));
             }
+            ClientMsg::GetAppDataState => {
+                let snap = state.appdata.snapshot();
+                let _ = out_tx.send(ServerMsg::AppDataState(snap));
+            }
+            ClientMsg::SetAppDataDir { path } => match state.appdata.set_dir(&path) {
+                Ok(snap) => {
+                    let _ = out_tx.send(ServerMsg::ActionFeedback {
+                        target: "KAAGE_APPDATA".into(),
+                        ok: true,
+                        message: format!("Set to {}", snap.appdata_dir),
+                    });
+                    let _ = out_tx.send(ServerMsg::AppDataState(snap));
+                }
+                Err(err) => {
+                    let _ = out_tx.send(ServerMsg::ActionFeedback {
+                        target: "KAAGE_APPDATA".into(),
+                        ok: false,
+                        message: err,
+                    });
+                }
+            },
+            ClientMsg::CreateAppDataDir { app_name } => {
+                match state.appdata.create_app_dir(&app_name) {
+                    Ok(path) => {
+                        let _ = out_tx.send(ServerMsg::ActionFeedback {
+                            target: format!("appdata/{app_name}"),
+                            ok: true,
+                            message: format!("Created {}", path.display()),
+                        });
+                        let _ = out_tx.send(ServerMsg::AppDataState(state.appdata.snapshot()));
+                    }
+                    Err(err) => {
+                        let _ = out_tx.send(ServerMsg::ActionFeedback {
+                            target: format!("appdata/{app_name}"),
+                            ok: false,
+                            message: err,
+                        });
+                    }
+                }
+            }
             ClientMsg::GetUnitStatus { unit, scope } => {
                 let normalized = normalize_service_name(&unit);
                 match get_unit_status(&state, &normalized, scope).await {
@@ -763,6 +820,10 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
                 };
                 command.env("TERM", "xterm-256color");
                 command.env("COLORTERM", "truecolor");
+                command.env(
+                    "KAAGE_APPDATA",
+                    state.appdata.current_dir().display().to_string(),
+                );
                 if let Ok(home) = std::env::var("HOME") {
                     command.cwd(home);
                 }
@@ -1388,6 +1449,7 @@ mod tests {
             allow_system_backends: false,
             docker: None,
             vitals: vitals::VitalsCollector::new(),
+            appdata: appdata::AppDataManager::new(),
             dist_dir: PathBuf::from("dist"),
         })
     }

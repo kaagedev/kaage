@@ -11,6 +11,7 @@ endif
 
 KAAGE_BIND ?= 127.0.0.1:9090
 KAAGE_DIST_DIR ?= dist
+KAAGE_APPDATA ?= ~/appdata
 
 .PHONY: help build build-nix test run run-ui run-native clean
 
@@ -22,6 +23,7 @@ help: ## Show available Makefile targets
 	@echo "Environment overrides:"
 	@echo "  KAAGE_BIND=$(KAAGE_BIND)"
 	@echo "  KAAGE_DIST_DIR=$(KAAGE_DIST_DIR)"
+	@echo "  KAAGE_APPDATA=$(KAAGE_APPDATA)"
 
 build: ## Build kaaged daemon and WASM webtop bundle (dist/)
 	$(RUN) cargo build -p kaaged
@@ -36,7 +38,7 @@ test: ## Run workspace unit tests and verify WASM target compiles
 
 run: ## Build WASM UI and run kaaged locally (http://127.0.0.1:9090)
 	$(RUN) trunk build
-	KAAGE_BIND=$(KAAGE_BIND) KAAGE_DIST_DIR=$(KAAGE_DIST_DIR) $(RUN) cargo run -p kaaged
+	KAAGE_BIND=$(KAAGE_BIND) KAAGE_DIST_DIR=$(KAAGE_DIST_DIR) KAAGE_APPDATA=$(KAAGE_APPDATA) $(RUN) cargo run -p kaaged
 
 run-ui: ## Serve live-reloading WASM UI via trunk (http://127.0.0.1:8080)
 	$(RUN) trunk serve

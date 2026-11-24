@@ -3,27 +3,52 @@ use crate::theme::{
     preset_palette, user_settings,
 };
 use egui::{Color32, CornerRadius, RichText, ScrollArea, Stroke, Ui};
+use kaage_proto::{AppDataSnapshot, ClientMsg};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum SettingsTab {
     #[default]
     Typography,
     ColorTheme,
+    AppData,
 }
 
 pub struct SettingsWindow {
     pub tab: SettingsTab,
+    pub appdata_input: String,
+    pub appdata_dirty: bool,
+    pub new_app_name: String,
 }
 
 impl SettingsWindow {
     pub fn new() -> Self {
         Self {
             tab: SettingsTab::Typography,
+            appdata_input: "~/appdata".into(),
+            appdata_dirty: false,
+            new_app_name: String::new(),
         }
     }
 
-    pub fn ui(&mut self, ui: &mut Ui) {
+    pub fn new_on_appdata() -> Self {
+        let mut w = Self::new();
+        w.tab = SettingsTab::AppData;
+        w
+    }
+
+    pub fn ui(
+        &mut self,
+        ui: &mut Ui,
+        appdata: Option<&AppDataSnapshot>,
+        send_msg: &mut dyn FnMut(ClientMsg),
+    ) {
         let p = palette();
+
+        if !self.appdata_dirty
+            && let Some(snap) = appdata
+        {
+            self.appdata_input = snap.appdata_dir.clone();
+        }
 
         ui.horizontal_wrapped(|ui| {
             ui.label(
@@ -51,15 +76,212 @@ impl SettingsWindow {
             {
                 self.tab = SettingsTab::ColorTheme;
             }
+            if be_toggle_button(ui, "App Data", self.tab == SettingsTab::AppData).clicked() {
+                self.tab = SettingsTab::AppData;
+                send_msg(ClientMsg::GetAppDataState);
+            }
         });
         ui.separator();
 
         ScrollArea::vertical()
             .id_salt("kaage_settings_scroll")
+            .auto_shrink([false, false])
             .show(ui, |ui| match self.tab {
                 SettingsTab::Typography => render_typography_tab(ui),
                 SettingsTab::ColorTheme => render_color_theme_tab(ui),
+                SettingsTab::AppData => self.render_appdata_tab(ui, appdata, send_msg),
             });
+    }
+
+    fn render_appdata_tab(
+        &mut self,
+        ui: &mut Ui,
+        appdata: Option<&AppDataSnapshot>,
+        send_msg: &mut dyn FnMut(ClientMsg),
+    ) {
+        let p = palette();
+
+        section_title(ui, "KAAGE_APPDATA BASE DIRECTORY");
+        ui.label(
+            RichText::new(
+                "Apps running on kaage store their data under $KAAGE_APPDATA/<app_name>/ (default: ~/appdata/). \
+                 New kaage terminals automatically export KAAGE_APPDATA.",
+            )
+            .size(11.5)
+            .color(p.text_muted),
+        );
+        ui.add_space(6.0);
+
+        egui::Frame::NONE
+            .fill(p.well)
+            .stroke(Stroke::new(1.0, p.border))
+            .inner_margin(8.0)
+            .show(ui, |ui| {
+                ui.set_min_width(ui.available_width());
+                ui.horizontal_wrapped(|ui| {
+                    ui.label(
+                        RichText::new("KAAGE_APPDATA")
+                            .monospace()
+                            .strong()
+                            .color(p.accent),
+                    );
+                    let edit = ui.add(
+                        egui::TextEdit::singleline(&mut self.appdata_input)
+                            .hint_text("~/appdata")
+                            .desired_width(280.0),
+                    );
+                    if edit.changed() {
+                        self.appdata_dirty = true;
+                    }
+                    if be_button(ui, "Apply").clicked() {
+                        send_msg(ClientMsg::SetAppDataDir {
+                            path: self.appdata_input.clone(),
+                        });
+                        self.appdata_dirty = false;
+                    }
+                    if be_button(ui, "Reset ~/appdata").clicked() {
+                        self.appdata_input = "~/appdata".into();
+                        self.appdata_dirty = false;
+                        send_msg(ClientMsg::SetAppDataDir {
+                            path: "~/appdata".into(),
+                        });
+                    }
+                    if be_button(ui, "Copy").clicked() {
+                        ui.ctx().copy_text(self.appdata_input.clone());
+                    }
+                    if be_button(ui, "Refresh").clicked() {
+                        self.appdata_dirty = false;
+                        send_msg(ClientMsg::GetAppDataState);
+                    }
+                });
+
+                if let Some(snap) = appdata {
+                    ui.add_space(4.0);
+                    ui.horizontal_wrapped(|ui| {
+                        ui.label(
+                            RichText::new(if snap.exists {
+                                "● Directory ready"
+                            } else {
+                                "● Not created yet"
+                            })
+                            .monospace()
+                            .size(10.5)
+                            .color(if snap.exists {
+                                p.status_green
+                            } else {
+                                p.status_amber
+                            }),
+                        );
+                        ui.label(
+                            RichText::new(if snap.from_env {
+                                "• source: KAAGE_APPDATA env"
+                            } else {
+                                "• source: default / saved config"
+                            })
+                            .monospace()
+                            .size(10.5)
+                            .color(p.text_muted),
+                        );
+                    });
+                }
+            });
+
+        ui.add_space(10.0);
+        section_title(ui, "APP DIRECTORIES");
+        egui::Frame::NONE
+            .fill(p.well)
+            .stroke(Stroke::new(1.0, p.border))
+            .inner_margin(8.0)
+            .show(ui, |ui| {
+                ui.set_min_width(ui.available_width());
+                ui.horizontal_wrapped(|ui| {
+                    ui.label(RichText::new("New App Dir:").color(p.text));
+                    let resp = ui.add(
+                        egui::TextEdit::singleline(&mut self.new_app_name)
+                            .hint_text("e.g. notes, comfyui, postgres")
+                            .desired_width(200.0),
+                    );
+                    let enter =
+                        resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                    if (be_button(ui, "+ Create").clicked() || enter)
+                        && !self.new_app_name.trim().is_empty()
+                    {
+                        send_msg(ClientMsg::CreateAppDataDir {
+                            app_name: self.new_app_name.trim().to_string(),
+                        });
+                        self.new_app_name.clear();
+                    }
+                });
+                ui.separator();
+
+                let Some(snap) = appdata else {
+                    ui.label(
+                        RichText::new("Loading KAAGE_APPDATA state...")
+                            .italics()
+                            .color(p.text_muted),
+                    );
+                    return;
+                };
+
+                if snap.apps.is_empty() {
+                    ui.label(
+                        RichText::new(format!(
+                            "No app directories inside {} yet. Create one above.",
+                            snap.appdata_dir
+                        ))
+                        .italics()
+                        .color(p.text_muted),
+                    );
+                } else {
+                    for app in &snap.apps {
+                        ui.horizontal(|ui| {
+                            ui.label(
+                                RichText::new(&app.app_name)
+                                    .monospace()
+                                    .strong()
+                                    .color(p.accent),
+                            );
+                            ui.label(
+                                RichText::new(&app.path)
+                                    .monospace()
+                                    .size(10.5)
+                                    .color(p.text_muted),
+                            );
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    if be_button(ui, "Copy Path").clicked() {
+                                        ui.ctx().copy_text(app.path.clone());
+                                    }
+                                    ui.label(
+                                        RichText::new(format!(
+                                            "{} files · {}",
+                                            app.file_count,
+                                            fmt_appdata_bytes(app.size_bytes)
+                                        ))
+                                        .monospace()
+                                        .size(10.5)
+                                        .color(p.text),
+                                    );
+                                },
+                            );
+                        });
+                        ui.separator();
+                    }
+                }
+            });
+    }
+}
+
+fn fmt_appdata_bytes(b: u64) -> String {
+    if b >= 1024 * 1024 * 1024 {
+        format!("{:.1} GiB", b as f64 / (1024.0 * 1024.0 * 1024.0))
+    } else if b >= 1024 * 1024 {
+        format!("{:.1} MiB", b as f64 / (1024.0 * 1024.0))
+    } else if b >= 1024 {
+        format!("{:.1} KiB", b as f64 / 1024.0)
+    } else {
+        format!("{b} B")
     }
 }
 

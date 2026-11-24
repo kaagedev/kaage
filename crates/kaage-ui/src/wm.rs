@@ -14,7 +14,8 @@ use crate::theme::{TOPBAR_HEIGHT, draw_beos_bevel, palette};
 use crate::vitals::{VitalsSpawnRequest, VitalsWindow};
 use egui::{Color32, CornerRadius, Id, Key, Pos2, Rect, Sense, Stroke, Vec2};
 use kaage_proto::{
-    ClientMsg, ContainerInfo, DashboardSnapshot, NixosInfo, SystemdUnitInfo, SystemdUnitStatus,
+    AppDataSnapshot, ClientMsg, ContainerInfo, DashboardSnapshot, NixosInfo, SystemdUnitInfo,
+    SystemdUnitStatus,
 };
 
 pub const WORKSPACE_NAMES: [&str; 4] = ["1: Ops", "2: AI", "3: Files", "4: Logs"];
@@ -247,6 +248,7 @@ impl BeWindowManager {
         selected_unit_status: &mut Option<SystemdUnitStatus>,
         containers: &[ContainerInfo],
         dashboard: Option<&DashboardSnapshot>,
+        appdata: Option<&AppDataSnapshot>,
         cpu_history: &[f32],
         mem_history: &[f32],
         send_msg: &mut dyn FnMut(ClientMsg),
@@ -701,7 +703,7 @@ impl BeWindowManager {
                                     help.ui(&mut child_ui);
                                 }
                                 PaneKind::Settings(settings) => {
-                                    settings.ui(&mut child_ui);
+                                    settings.ui(&mut child_ui, appdata, send_msg);
                                 }
                             }
                         }

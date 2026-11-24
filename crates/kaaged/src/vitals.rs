@@ -63,7 +63,7 @@ pub struct VitalsCollector {
 
 impl VitalsCollector {
     pub fn new() -> Arc<Self> {
-        let persist_path = crate::files::expand_path("~/.local/share/kaage/vitals.bin");
+        let persist_path = crate::appdata::kaage_app_dir().join("vitals.bin");
         let rollups = load_persisted_rollups(&persist_path);
         let (tick_tx, _) = broadcast::channel(64);
         Arc::new(Self {

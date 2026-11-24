@@ -16,6 +16,7 @@ pub enum PaletteAction {
     OpenContainers,
     OpenHelp,
     OpenSettings,
+    OpenAppDataSettings,
     NewTerminal,
     ToggleTheme,
     ToggleWallpaper,
@@ -308,6 +309,12 @@ fn build_items(
             category: "CFG",
             shortcut: "⚙".into(),
             action: PaletteAction::OpenSettings,
+        },
+        PaletteItem {
+            label: "Open kaage-settings → App Data (KAAGE_APPDATA)".into(),
+            category: "CFG",
+            shortcut: "DIR".into(),
+            action: PaletteAction::OpenAppDataSettings,
         },
         PaletteItem {
             label: "Workspace 1: Ops".into(),

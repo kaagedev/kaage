@@ -218,7 +218,7 @@ fn render_kaage_shortcuts(ui: &mut Ui) {
             ("F5 / F6", "Copy or Move selected items between Left and Right panes."),
             ("Tab", "Switch active focus between Left and Right folder panes."),
             ("+Shelf / Move Here", "Stage files across deep directory trees in the bottom Holding Shelf."),
-            ("Trash + Undo", "Safe delete to ~/.local/share/kaage/trash with 1-click Undo in the toolbar or toast."),
+            ("Trash + Undo", "Safe delete to $KAAGE_APPDATA/kaage/trash with 1-click Undo in the toolbar or toast."),
             ("● unit.service", "Click a green systemd badge on any open file to tail its journalctl logs."),
         ],
     );

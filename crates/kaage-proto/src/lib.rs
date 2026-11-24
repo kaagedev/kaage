@@ -491,6 +491,22 @@ pub struct VitalsSnapshot {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AppDataDirInfo {
+    pub app_name: String,
+    pub path: String,
+    pub size_bytes: u64,
+    pub file_count: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct AppDataSnapshot {
+    pub appdata_dir: String,
+    pub exists: bool,
+    pub from_env: bool,
+    pub apps: Vec<AppDataDirInfo>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ClientMsg {
     ListUnits,
     RefreshDashboard,
@@ -561,6 +577,13 @@ pub enum ClientMsg {
     UnregisterTailscaleServe {
         https_port: u16,
     },
+    GetAppDataState,
+    SetAppDataDir {
+        path: String,
+    },
+    CreateAppDataDir {
+        app_name: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -597,6 +620,7 @@ pub enum ServerMsg {
         done: bool,
     },
     WorkspacesSnapshot(Vec<WorkspaceDef>),
+    AppDataState(AppDataSnapshot),
 }
 
 #[cfg(test)]

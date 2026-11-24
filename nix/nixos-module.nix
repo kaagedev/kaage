@@ -112,6 +112,16 @@ in
       description = "Optional container CLI override (KAAGE_CONTAINER_CLI) for container shell exec.";
     };
 
+    appDataDir = lib.mkOption {
+      type = lib.types.nullOr lib.types.str;
+      default = null;
+      example = "/home/pradeep/appdata";
+      description = ''
+        Optional base directory for kaage app data (sets KAAGE_APPDATA).
+        When null, defaults to ~/appdata.
+      '';
+    };
+
     allowSystemdControl = lib.mkOption {
       type = lib.types.bool;
       default = true;
@@ -192,6 +202,9 @@ in
         }
         // lib.optionalAttrs (cfg.containerCli != null) {
           KAAGE_CONTAINER_CLI = cfg.containerCli;
+        }
+        // lib.optionalAttrs (cfg.appDataDir != null) {
+          KAAGE_APPDATA = cfg.appDataDir;
         };
 
       serviceConfig = {

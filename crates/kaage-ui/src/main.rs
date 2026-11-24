@@ -21,8 +21,8 @@ use file_tracker::TrackerWindow;
 use help::HelpWindow;
 use inspectors::{InspectorSpawnRequest, ScopeFilter, StateFilter};
 use kaage_proto::{
-    ClientMsg, ContainerInfo, DashboardSnapshot, FileOp, HostMetrics, NixosInfo, ServerMsg,
-    SystemdUnitInfo, SystemdUnitStatus, UnitAction, VitalsTick,
+    AppDataSnapshot, ClientMsg, ContainerInfo, DashboardSnapshot, FileOp, HostMetrics, NixosInfo,
+    ServerMsg, SystemdUnitInfo, SystemdUnitStatus, UnitAction, VitalsTick,
 };
 use palette::{CommandPalette, PaletteAction};
 use settings::SettingsWindow;
@@ -60,6 +60,7 @@ struct KaageApp {
     metrics: Option<HostMetrics>,
     latest_vital: Option<VitalsTick>,
     dashboard: Option<DashboardSnapshot>,
+    appdata: Option<AppDataSnapshot>,
     cpu_history: Vec<f32>,
     mem_history: Vec<f32>,
     units: Vec<SystemdUnitInfo>,
@@ -177,6 +178,7 @@ impl KaageApp {
             metrics: None,
             latest_vital: None,
             dashboard: None,
+            appdata: None,
             cpu_history: Vec::with_capacity(MAX_HISTORY_SAMPLES),
             mem_history: Vec::with_capacity(MAX_HISTORY_SAMPLES),
             units: Vec::new(),
@@ -223,6 +225,7 @@ impl KaageApp {
         self.send_client_msg(ClientMsg::ListUnits);
         self.send_client_msg(ClientMsg::ListContainers);
         self.send_client_msg(ClientMsg::RefreshDashboard);
+        self.send_client_msg(ClientMsg::GetAppDataState);
         self.send_client_msg(ClientMsg::SpawnPty {
             session_id: 1,
             cols: 80,
@@ -424,6 +427,7 @@ impl KaageApp {
     }
 
     fn open_settings(&mut self) {
+        self.send_client_msg(ClientMsg::GetAppDataState);
         if self
             .wm
             .focus_matching_tab(|k| matches!(k, PaneKind::Settings(_)))
@@ -433,6 +437,27 @@ impl KaageApp {
         self.wm.open_window(
             "kaage-settings".into(),
             PaneKind::Settings(SettingsWindow::new()),
+            self.stage_origin(28.0, 24.0),
+            Vec2::new(760.0, 520.0),
+        );
+    }
+
+    fn open_appdata_settings(&mut self) {
+        self.send_client_msg(ClientMsg::GetAppDataState);
+        for group in &mut self.wm.groups {
+            for (idx, tab) in group.tabs.iter_mut().enumerate() {
+                if let PaneKind::Settings(settings) = &mut tab.kind {
+                    settings.tab = settings::SettingsTab::AppData;
+                    group.active_tab = idx;
+                    self.wm.active_workspace = group.workspace;
+                    self.wm.focused_group = Some(group.id);
+                    return;
+                }
+            }
+        }
+        self.wm.open_window(
+            "kaage-settings".into(),
+            PaneKind::Settings(SettingsWindow::new_on_appdata()),
             self.stage_origin(28.0, 24.0),
             Vec2::new(760.0, 520.0),
         );
@@ -620,6 +645,7 @@ impl eframe::App for KaageApp {
                                 }
                             }
                             ServerMsg::SearchResults { .. } => {}
+                            ServerMsg::AppDataState(snap) => self.appdata = Some(snap),
                         }
                     }
                 }
@@ -763,6 +789,7 @@ impl eframe::App for KaageApp {
             &mut self.selected_unit_status,
             &self.containers,
             self.dashboard.as_ref(),
+            self.appdata.as_ref(),
             &self.cpu_history,
             &self.mem_history,
             &mut |msg| {
@@ -829,6 +856,7 @@ impl eframe::App for KaageApp {
                 PaletteAction::OpenContainers => self.open_containers_window(),
                 PaletteAction::OpenHelp => self.open_help(),
                 PaletteAction::OpenSettings => self.open_settings(),
+                PaletteAction::OpenAppDataSettings => self.open_appdata_settings(),
                 PaletteAction::NewTerminal => {
                     self.spawn_terminal_window("Terminal — shell".into(), None);
                 }
