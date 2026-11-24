@@ -38,6 +38,72 @@ use wm::{BeWindowManager, PaneKind};
 const WALLPAPER_BYTES: &[u8] = include_bytes!("../../../assets/kaage-wallpaper.jpg");
 const MAX_HISTORY_SAMPLES: usize = 60;
 
+#[cfg(target_arch = "wasm32")]
+static WASM_SHIFT_DOUBLE_TAP: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// Attach native DOM `keydown`/`keyup` listeners on `window` so double-tapping Shift works
+/// reliably in Firefox, Safari, Chrome, and Edge even when `eframe` coalesces fast modifier taps.
+#[cfg(target_arch = "wasm32")]
+fn install_wasm_shift_double_tap_listener(ctx: egui::Context) {
+    use std::cell::Cell;
+    use std::rc::Rc;
+    use std::sync::atomic::Ordering;
+    use wasm_bindgen::JsCast;
+    use wasm_bindgen::closure::Closure;
+
+    let Some(window) = web_sys::window() else {
+        return;
+    };
+
+    // (used_with_other_key, last_solo_shift_release_ms)
+    let state = Rc::new(Cell::new((false, 0.0_f64)));
+
+    {
+        let st = Rc::clone(&state);
+        let on_keydown = Closure::<dyn FnMut(web_sys::KeyboardEvent)>::new(move |e: web_sys::KeyboardEvent| {
+            let (used_other, last_ms) = st.get();
+            if e.key() == "Shift" {
+                if !e.repeat() {
+                    if e.ctrl_key() || e.alt_key() || e.meta_key() {
+                        st.set((true, 0.0));
+                    } else {
+                        st.set((false, last_ms));
+                    }
+                }
+            } else {
+                let _ = used_other;
+                st.set((true, 0.0));
+            }
+        });
+        let _ = window.add_event_listener_with_callback("keydown", on_keydown.as_ref().unchecked_ref());
+        on_keydown.forget();
+    }
+
+    {
+        let st = Rc::clone(&state);
+        let on_keyup = Closure::<dyn FnMut(web_sys::KeyboardEvent)>::new(move |e: web_sys::KeyboardEvent| {
+            if e.key() == "Shift" {
+                let (used_other, last_ms) = st.get();
+                if !used_other && !e.ctrl_key() && !e.alt_key() && !e.meta_key() {
+                    let now_ms = js_sys::Date::now();
+                    if now_ms - last_ms <= 450.0 {
+                        WASM_SHIFT_DOUBLE_TAP.store(true, Ordering::Relaxed);
+                        st.set((false, 0.0));
+                        ctx.request_repaint();
+                    } else {
+                        st.set((false, now_ms));
+                    }
+                } else {
+                    st.set((false, 0.0));
+                }
+            }
+        });
+        let _ = window.add_event_listener_with_callback("keyup", on_keyup.as_ref().unchecked_ref());
+        on_keyup.forget();
+    }
+}
+
 struct ToastNotice {
     ok: bool,
     text: String,
@@ -70,8 +136,11 @@ struct KaageApp {
     next_tracker_pane_id: u64,
     pending_undo: Option<ClientMsg>,
     toast: Option<ToastNotice>,
+    #[cfg(not(target_arch = "wasm32"))]
     shift_was_down: bool,
+    #[cfg(not(target_arch = "wasm32"))]
     shift_used_with_other: bool,
+    #[cfg(not(target_arch = "wasm32"))]
     last_shift_tap_at: f64,
 }
 
@@ -94,6 +163,8 @@ impl KaageApp {
         let theme_mode = ThemeMode::ObsidianAmber;
         apply_theme(&cc.egui_ctx, theme_mode);
         let wallpaper = load_wallpaper_texture(&cc.egui_ctx);
+        #[cfg(target_arch = "wasm32")]
+        install_wasm_shift_double_tap_listener(cc.egui_ctx.clone());
 
         let ctx_clone = cc.egui_ctx.clone();
         let (ws_tx, ws_rx) = ewebsock::connect_with_wakeup(
@@ -188,8 +259,11 @@ impl KaageApp {
             next_tracker_pane_id: 1,
             pending_undo: None,
             toast: None,
+            #[cfg(not(target_arch = "wasm32"))]
             shift_was_down: false,
+            #[cfg(not(target_arch = "wasm32"))]
             shift_used_with_other: false,
+            #[cfg(not(target_arch = "wasm32"))]
             last_shift_tap_at: -10.0,
         }
     }
@@ -484,38 +558,48 @@ impl eframe::App for KaageApp {
         ctx.request_repaint_after(std::time::Duration::from_secs(1));
 
         // Global Shift×2 (double-tap Shift) Command Palette shortcut — zero browser/terminal conflicts.
-        let (shift_down, other_activity) = ctx.input(|i| {
-            let shift = i.modifiers.shift;
-            let other_mod = i.modifiers.ctrl || i.modifiers.alt || i.modifiers.mac_cmd || i.modifiers.command;
-            let key_or_text = i.events.iter().any(|e| {
-                matches!(
-                    e,
-                    egui::Event::Text(_) | egui::Event::Key { pressed: true, .. }
-                )
-            });
-            (shift, other_mod || key_or_text)
-        });
-        if shift_down && !self.shift_was_down {
-            self.shift_used_with_other = false;
-        }
-        if shift_down && other_activity {
-            self.shift_used_with_other = true;
-            self.last_shift_tap_at = -10.0;
-        }
-        if !shift_down && self.shift_was_down {
-            if !self.shift_used_with_other {
-                if now - self.last_shift_tap_at <= 0.35 {
-                    self.cmd_palette.toggle();
-                    self.last_shift_tap_at = -10.0;
-                } else {
-                    self.last_shift_tap_at = now;
-                }
+        #[cfg(target_arch = "wasm32")]
+        {
+            if WASM_SHIFT_DOUBLE_TAP.swap(false, std::sync::atomic::Ordering::Relaxed) {
+                self.cmd_palette.toggle();
             }
-            self.shift_used_with_other = false;
-        } else if !shift_down && other_activity {
-            self.last_shift_tap_at = -10.0;
         }
-        self.shift_was_down = shift_down;
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let (shift_down, other_activity) = ctx.input(|i| {
+                let shift = i.modifiers.shift;
+                let other_mod =
+                    i.modifiers.ctrl || i.modifiers.alt || i.modifiers.mac_cmd || i.modifiers.command;
+                let key_or_text = i.events.iter().any(|e| {
+                    matches!(
+                        e,
+                        egui::Event::Text(_) | egui::Event::Key { pressed: true, .. }
+                    )
+                });
+                (shift, other_mod || key_or_text)
+            });
+            if shift_down && !self.shift_was_down {
+                self.shift_used_with_other = false;
+            }
+            if shift_down && other_activity {
+                self.shift_used_with_other = true;
+                self.last_shift_tap_at = -10.0;
+            }
+            if !shift_down && self.shift_was_down {
+                if !self.shift_used_with_other {
+                    if now - self.last_shift_tap_at <= 0.45 {
+                        self.cmd_palette.toggle();
+                        self.last_shift_tap_at = -10.0;
+                    } else {
+                        self.last_shift_tap_at = now;
+                    }
+                }
+                self.shift_used_with_other = false;
+            } else if !shift_down && other_activity {
+                self.last_shift_tap_at = -10.0;
+            }
+            self.shift_was_down = shift_down;
+        }
 
         while let Some(event) = self.ws_rx.try_recv() {
             match event {
