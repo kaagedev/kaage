@@ -17,7 +17,9 @@ mod wm;
 
 use deskbar::{BeDeskbar, DeskbarAction};
 use desktop_icons::{DesktopIconAction, show_desktop_icons};
-use dom_overlay::{CopilotCrossAction, CopilotWindow, is_dom_overlay_focused};
+use dom_overlay::{CopilotCrossAction, CopilotWindow};
+#[cfg(not(target_arch = "wasm32"))]
+use dom_overlay::is_dom_overlay_focused;
 use eframe::egui::{self, Color32, CornerRadius, Id, Pos2, Rect, Stroke, Vec2};
 use ewebsock::{WsEvent, WsMessage, WsReceiver, WsSender};
 use file_tracker::TrackerWindow;
@@ -622,30 +624,27 @@ impl eframe::App for KaageApp {
         ctx.request_repaint_after(std::time::Duration::from_secs(1));
 
         // Global Command Palette shortcut: Cmd+/ (macOS) or Ctrl+` (Linux/Windows).
-        // Suppress while HTML DOM overlay prompt textarea holds focus.
-        if !is_dom_overlay_focused() {
-            #[cfg(target_arch = "wasm32")]
-            {
-                if WASM_PALETTE_TRIGGER.swap(false, std::sync::atomic::Ordering::Relaxed) {
-                    self.cmd_palette.toggle();
-                }
+        #[cfg(target_arch = "wasm32")]
+        {
+            if WASM_PALETTE_TRIGGER.swap(false, std::sync::atomic::Ordering::Relaxed) {
+                self.cmd_palette.toggle();
             }
-            #[cfg(not(target_arch = "wasm32"))]
-            {
-                let triggered = ctx.input(|i| {
-                    let cmd_slash = i.modifiers.mac_cmd
-                        && !i.modifiers.ctrl
-                        && !i.modifiers.alt
-                        && i.key_pressed(egui::Key::Slash);
-                    let ctrl_backtick = i.modifiers.ctrl
-                        && !i.modifiers.mac_cmd
-                        && !i.modifiers.alt
-                        && i.key_pressed(egui::Key::Backtick);
-                    cmd_slash || ctrl_backtick
-                });
-                if triggered {
-                    self.cmd_palette.toggle();
-                }
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        if !is_dom_overlay_focused() {
+            let triggered = ctx.input(|i| {
+                let cmd_slash = i.modifiers.mac_cmd
+                    && !i.modifiers.ctrl
+                    && !i.modifiers.alt
+                    && i.key_pressed(egui::Key::Slash);
+                let ctrl_backtick = i.modifiers.ctrl
+                    && !i.modifiers.mac_cmd
+                    && !i.modifiers.alt
+                    && i.key_pressed(egui::Key::Backtick);
+                cmd_slash || ctrl_backtick
+            });
+            if triggered {
+                self.cmd_palette.toggle();
             }
         }
 
@@ -971,6 +970,7 @@ impl eframe::App for KaageApp {
         let (spawn_reqs, copilot_actions) = self.wm.show(
             &ctx,
             sidebar_width,
+            self.cmd_palette.open,
             self.nixos.as_ref(),
             &self.units,
             &mut self.selected_unit_status,

@@ -55,7 +55,7 @@ impl BeDeskbar {
         let screen = ctx.content_rect();
         let bar_rect = Rect::from_min_size(screen.min, Vec2::new(screen.width(), TOPBAR_HEIGHT));
 
-        egui::Area::new(Id::unique("kaage_topbar"))
+        let bar_resp = egui::Area::new(Id::unique("kaage_topbar"))
             .fixed_pos(bar_rect.min)
             .order(egui::Order::Foreground)
             .show(ctx, |ui| {
@@ -559,6 +559,7 @@ impl BeDeskbar {
                 }
             });
 
+        ctx.move_to_top(bar_resp.response.layer_id);
         action
     }
 }

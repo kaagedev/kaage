@@ -125,8 +125,8 @@ impl CommandPalette {
 
         let enter_pressed = ctx.input(|i| i.key_pressed(Key::Enter));
 
-        // Dim backdrop
-        egui::Area::new(Id::unique("kaage_cmd_backdrop"))
+        // Dim backdrop (always above all windows, topbar, sidebar, and toasts)
+        let backdrop_resp = egui::Area::new(Id::unique("kaage_cmd_backdrop"))
             .fixed_pos(screen.min)
             .order(egui::Order::Tooltip)
             .show(ctx, |ui| {
@@ -141,7 +141,7 @@ impl CommandPalette {
                 }
             });
 
-        egui::Area::new(Id::unique("kaage_cmd_palette"))
+        let palette_resp = egui::Area::new(Id::unique("kaage_cmd_palette"))
             .fixed_pos(modal_pos)
             .order(egui::Order::Tooltip)
             .show(ctx, |ui| {
@@ -231,6 +231,9 @@ impl CommandPalette {
                             });
                     });
             });
+
+        ctx.move_to_top(backdrop_resp.response.layer_id);
+        ctx.move_to_top(palette_resp.response.layer_id);
 
         if enter_pressed && !items.is_empty() && chosen.is_none() {
             chosen = Some(self.selected);

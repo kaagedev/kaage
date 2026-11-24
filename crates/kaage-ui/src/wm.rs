@@ -1,4 +1,6 @@
-use crate::dom_overlay::{CopilotCrossAction, CopilotWindow, hide_copilot_overlay};
+use crate::dom_overlay::{
+    CopilotCrossAction, CopilotWindow, hide_copilot_overlay, is_dom_overlay_focused,
+};
 use crate::file_tracker::{TrackerSpawnRequest, TrackerWindow};
 use crate::help::HelpWindow;
 use crate::inspectors::{
@@ -344,6 +346,7 @@ impl BeWindowManager {
         &mut self,
         ctx: &egui::Context,
         sidebar_width: f32,
+        modal_open: bool,
         nixos: Option<&NixosInfo>,
         units: &[SystemdUnitInfo],
         selected_unit_status: &mut Option<SystemdUnitStatus>,
@@ -360,23 +363,25 @@ impl BeWindowManager {
         let is_mobile = screen.width() < 768.0;
 
         // Keyboard workspace switching (Alt+1..4) and pane navigation (Alt+H/J/K/L)
-        ctx.input(|i| {
-            if i.modifiers.alt {
-                if i.key_pressed(Key::Num1) {
-                    self.active_workspace = 0;
-                } else if i.key_pressed(Key::Num2) {
-                    self.active_workspace = 1;
-                } else if i.key_pressed(Key::Num3) {
-                    self.active_workspace = 2;
-                } else if i.key_pressed(Key::Num4) {
-                    self.active_workspace = 3;
-                } else if i.key_pressed(Key::L) || i.key_pressed(Key::J) || i.key_pressed(Key::ArrowRight) {
-                    self.cycle_focus(1);
-                } else if i.key_pressed(Key::H) || i.key_pressed(Key::K) || i.key_pressed(Key::ArrowLeft) {
-                    self.cycle_focus(-1);
+        if !modal_open && !is_dom_overlay_focused() {
+            ctx.input(|i| {
+                if i.modifiers.alt {
+                    if i.key_pressed(Key::Num1) {
+                        self.active_workspace = 0;
+                    } else if i.key_pressed(Key::Num2) {
+                        self.active_workspace = 1;
+                    } else if i.key_pressed(Key::Num3) {
+                        self.active_workspace = 2;
+                    } else if i.key_pressed(Key::Num4) {
+                        self.active_workspace = 3;
+                    } else if i.key_pressed(Key::L) || i.key_pressed(Key::J) || i.key_pressed(Key::ArrowRight) {
+                        self.cycle_focus(1);
+                    } else if i.key_pressed(Key::H) || i.key_pressed(Key::K) || i.key_pressed(Key::ArrowLeft) {
+                        self.cycle_focus(-1);
+                    }
                 }
-            }
-        });
+            });
+        }
 
         // Compute stage rect for BSP tiling (respecting topbar, optional sidebar, right desktop icons)
         let left_margin = if is_mobile {
@@ -457,6 +462,49 @@ impl BeWindowManager {
         let mut close_req: Option<(u64, usize)> = None;
         let mut bring_to_front: Option<u64> = None;
 
+        // Detect clicks anywhere inside a window (tab bar OR body) to select and raise it to top.
+        if !modal_open
+            && ctx.input(|i| i.pointer.any_pressed())
+            && let Some(ptr) = ctx.input(|i| i.pointer.interact_pos())
+            && ptr.y > TOPBAR_HEIGHT
+            && ptr.x > sidebar_width
+        {
+            // Check floating (Order::Foreground) windows first, then workspace windows (Order::Middle),
+            // iterating top-to-bottom (reverse of `self.groups`).
+            for pass_floating in [true, false] {
+                if bring_to_front.is_some() {
+                    break;
+                }
+                for g in self.groups.iter().rev() {
+                    if g.floating != pass_floating {
+                        continue;
+                    }
+                    if !g.floating && g.workspace != self.active_workspace {
+                        continue;
+                    }
+                    if is_mobile && Some(g.id) != self.focused_group {
+                        continue;
+                    }
+                    if !is_mobile
+                        && is_focus_mode
+                        && !g.floating
+                        && Some(g.id) != focus_visible_tiled_id
+                    {
+                        continue;
+                    }
+                    let footprint = if g.shaded {
+                        Rect::from_min_size(g.pos, Vec2::new(g.size.x, tab_height + 2.0))
+                    } else {
+                        Rect::from_min_size(g.pos, Vec2::new(g.size.x, tab_height + g.size.y))
+                    };
+                    if footprint.contains(ptr) {
+                        bring_to_front = Some(g.id);
+                        break;
+                    }
+                }
+            }
+        }
+
         let header_zones: Vec<(u64, Rect)> = self
             .groups
             .iter()
@@ -464,7 +512,8 @@ impl BeWindowManager {
             .map(|g| (g.id, Rect::from_min_size(g.pos, Vec2::new(g.size.x, tab_height + 2.0))))
             .collect();
 
-        let focused_id = self.focused_group;
+        let focused_id = bring_to_front.or(self.focused_group);
+        let mut rendered_layers: Vec<(u64, bool, egui::LayerId)> = Vec::new();
 
         for group in &mut self.groups {
             if !group.floating && group.workspace != self.active_workspace {
@@ -485,7 +534,7 @@ impl BeWindowManager {
                 egui::Order::Middle
             };
 
-            egui::Area::new(Id::unique(("be_group", group.id)))
+            let area_resp = egui::Area::new(Id::unique(("be_group", group.id)))
                 .fixed_pos(group.pos)
                 .order(area_order)
                 .show(ctx, |ui| {
@@ -820,22 +869,24 @@ impl BeWindowManager {
                                     settings.ui(&mut child_ui, appdata, copilot_status, send_msg);
                                 }
                                 PaneKind::Copilot(copilot) => {
-                                    copilot_visible_this_frame = true;
-                                    let z = if group.floating {
-                                        600
-                                    } else if is_focused {
-                                        500
-                                    } else {
-                                        450
-                                    };
-                                    let acts = copilot.ui(
-                                        &mut child_ui,
-                                        inner_rect,
-                                        copilot_status,
-                                        any_dragging,
-                                        z,
-                                    );
-                                    copilot_actions.extend(acts);
+                                    if !modal_open {
+                                        copilot_visible_this_frame = true;
+                                        let z = if group.floating {
+                                            600
+                                        } else if is_focused {
+                                            500
+                                        } else {
+                                            450
+                                        };
+                                        let acts = copilot.ui(
+                                            &mut child_ui,
+                                            inner_rect,
+                                            copilot_status,
+                                            any_dragging,
+                                            z,
+                                        );
+                                        copilot_actions.extend(acts);
+                                    }
                                 }
                             }
                         }
@@ -859,6 +910,7 @@ impl BeWindowManager {
                         }
                     }
                 });
+            rendered_layers.push((group.id, group.floating, area_resp.response.layer_id));
         }
 
         // Mobile bottom tab pill deck (< 768px)
@@ -927,7 +979,20 @@ impl BeWindowManager {
             }
         }
 
-        if !copilot_visible_this_frame {
+        // Sync egui's internal Area layer stack to match `self.groups` z-order so the
+        // selected/focused window is ALWAYS rendered on top of all sibling windows.
+        for g in &self.groups {
+            if let Some(&(_, _, layer_id)) = rendered_layers.iter().find(|(id, _, _)| *id == g.id) {
+                ctx.move_to_top(layer_id);
+            }
+        }
+        if let Some(fgid) = self.focused_group
+            && let Some(&(_, _, layer_id)) = rendered_layers.iter().find(|(id, _, _)| *id == fgid)
+        {
+            ctx.move_to_top(layer_id);
+        }
+
+        if !copilot_visible_this_frame || modal_open {
             hide_copilot_overlay();
         }
 
