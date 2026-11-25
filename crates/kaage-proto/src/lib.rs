@@ -588,6 +588,9 @@ pub struct CopilotStatus {
     pub has_gemini_key: bool,
     pub has_openai_key: bool,
     pub has_anthropic_key: bool,
+    pub gemini_key_persisted: bool,
+    pub openai_key_persisted: bool,
+    pub anthropic_key_persisted: bool,
     pub local_endpoint: String,
     pub local_endpoints: Vec<LocalLlmEndpoint>,
     pub active_local_name: Option<String>,
@@ -628,6 +631,47 @@ pub enum CopilotCard {
         category: String,
         summary: String,
     },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub enum DebugLogLevel {
+    Trace,
+    Debug,
+    Info,
+    Warn,
+    Error,
+}
+
+impl DebugLogLevel {
+    pub fn short(self) -> &'static str {
+        match self {
+            Self::Trace => "TRC",
+            Self::Debug => "DBG",
+            Self::Info => "INF",
+            Self::Warn => "WRN",
+            Self::Error => "ERR",
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Trace => "TRACE",
+            Self::Debug => "DEBUG",
+            Self::Info => "INFO",
+            Self::Warn => "WARN",
+            Self::Error => "ERROR",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DebugLogEntry {
+    pub seq: u64,
+    pub ts_ms: i64,
+    pub level: DebugLogLevel,
+    pub module: String,
+    pub target: String,
+    pub message: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -748,6 +792,13 @@ pub enum ClientMsg {
         action_id: String,
         approved: bool,
     },
+    GetDebugLogs,
+    ClearDebugLogs,
+    EmitDebugLog {
+        level: DebugLogLevel,
+        module: String,
+        message: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -811,6 +862,8 @@ pub enum ServerMsg {
         message: String,
         models: Vec<String>,
     },
+    DebugLogsSnapshot(Vec<DebugLogEntry>),
+    DebugLogEntry(DebugLogEntry),
 }
 
 #[cfg(test)]

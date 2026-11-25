@@ -1,4 +1,5 @@
 mod clock;
+mod debug_panel;
 mod deskbar;
 mod desktop_icons;
 mod dom_overlay;
@@ -15,6 +16,7 @@ mod tracker;
 mod vitals;
 mod wm;
 
+use debug_panel::DebugPanelWindow;
 use deskbar::{BeDeskbar, DeskbarAction};
 use desktop_icons::{DesktopIconAction, show_desktop_icons};
 use dom_overlay::{CopilotCrossAction, CopilotWindow};
@@ -26,9 +28,11 @@ use file_tracker::TrackerWindow;
 use help::HelpWindow;
 use inspectors::{InspectorSpawnRequest, ScopeFilter, StateFilter};
 use kaage_proto::{
-    AppDataSnapshot, ClientMsg, ContainerInfo, CopilotStatus, DashboardSnapshot, FileOp,
-    HostMetrics, NixosInfo, ServerMsg, SystemdUnitInfo, SystemdUnitStatus, UnitAction, VitalsTick,
+    AppDataSnapshot, ClientMsg, ContainerInfo, CopilotStatus, DashboardSnapshot, DebugLogEntry,
+    DebugLogLevel, FileOp, HostMetrics, NixosInfo, ServerMsg, SystemdUnitInfo, SystemdUnitStatus,
+    UnitAction, VitalsTick,
 };
+use std::collections::VecDeque;
 use palette::{CommandPalette, PaletteAction};
 use session::{
     SavedSession, load_session, load_workspace_layouts, save_session_bytes, save_workspace_layouts,
@@ -123,6 +127,7 @@ struct KaageApp {
     dashboard: Option<DashboardSnapshot>,
     appdata: Option<AppDataSnapshot>,
     copilot_status: Option<CopilotStatus>,
+    debug_logs: VecDeque<DebugLogEntry>,
     cpu_history: Vec<f32>,
     mem_history: Vec<f32>,
     units: Vec<SystemdUnitInfo>,
@@ -283,6 +288,7 @@ impl KaageApp {
             dashboard: None,
             appdata: None,
             copilot_status: None,
+            debug_logs: VecDeque::with_capacity(2000),
             cpu_history: Vec::with_capacity(MAX_HISTORY_SAMPLES),
             mem_history: Vec::with_capacity(MAX_HISTORY_SAMPLES),
             units: Vec::new(),
@@ -331,6 +337,7 @@ impl KaageApp {
         self.send_client_msg(ClientMsg::RefreshDashboard);
         self.send_client_msg(ClientMsg::GetAppDataState);
         self.send_client_msg(ClientMsg::GetCopilotStatus);
+        self.send_client_msg(ClientMsg::GetDebugLogs);
         let startup = std::mem::take(&mut self.pending_startup_msgs);
         for msg in startup {
             self.send_client_msg(msg);
@@ -603,6 +610,41 @@ impl KaageApp {
         );
     }
 
+    fn open_debug_panel(&mut self) {
+        self.send_client_msg(ClientMsg::GetDebugLogs);
+        if self
+            .wm
+            .focus_matching_tab(|k| matches!(k, PaneKind::DebugPanel(_)))
+        {
+            return;
+        }
+        self.wm.open_window(
+            "Debug Console".into(),
+            PaneKind::DebugPanel(DebugPanelWindow::new()),
+            self.stage_origin(28.0, 28.0),
+            Vec2::new(780.0, 480.0),
+        );
+    }
+
+    fn push_debug_log(&mut self, entry: DebugLogEntry) {
+        if self.debug_logs.len() >= 2000 {
+            self.debug_logs.pop_front();
+        }
+        self.debug_logs.push_back(entry);
+    }
+
+    fn push_ui_debug_log(&mut self, level: DebugLogLevel, module: &str, message: String) {
+        let seq = self.debug_logs.back().map(|e| e.seq + 1).unwrap_or(1);
+        self.push_debug_log(DebugLogEntry {
+            seq,
+            ts_ms: 0,
+            level,
+            module: module.to_string(),
+            target: format!("kaage_ui::{module}"),
+            message,
+        });
+    }
+
     fn toggle_theme(&mut self, ctx: &egui::Context) {
         self.theme_mode = current_theme_mode().toggle();
         apply_theme(ctx, self.theme_mode);
@@ -652,13 +694,28 @@ impl eframe::App for KaageApp {
             match event {
                 WsEvent::Opened => {
                     self.connected = true;
+                    self.push_ui_debug_log(
+                        DebugLogLevel::Info,
+                        "ws",
+                        "WebSocket connected to kaaged".into(),
+                    );
                     self.send_initial_sync();
                 }
                 WsEvent::Closed => {
                     self.connected = false;
+                    self.push_ui_debug_log(
+                        DebugLogLevel::Warn,
+                        "ws",
+                        "WebSocket connection closed".into(),
+                    );
                 }
                 WsEvent::Error(err) => {
                     self.connected = false;
+                    self.push_ui_debug_log(
+                        DebugLogLevel::Error,
+                        "ws",
+                        format!("WebSocket error: {err}"),
+                    );
                     self.toast = Some(ToastNotice {
                         ok: false,
                         text: format!("WebSocket error: {err}"),
@@ -855,6 +912,15 @@ impl eframe::App for KaageApp {
                                     undo_msg: None,
                                 });
                             }
+                            ServerMsg::DebugLogsSnapshot(entries) => {
+                                self.debug_logs.clear();
+                                for e in entries {
+                                    self.push_debug_log(e);
+                                }
+                            }
+                            ServerMsg::DebugLogEntry(entry) => {
+                                self.push_debug_log(entry);
+                            }
                         }
                     }
                 }
@@ -961,6 +1027,7 @@ impl eframe::App for KaageApp {
                     TrackerAction::OpenHelp => self.open_help(),
                     TrackerAction::OpenSettings => self.open_settings(),
                     TrackerAction::OpenCopilot => self.open_copilot(),
+                    TrackerAction::OpenDebugPanel => self.open_debug_panel(),
                     TrackerAction::OpenJournal { user } => {
                         let (title, cmd) = if user {
                             (
@@ -1002,6 +1069,7 @@ impl eframe::App for KaageApp {
             self.dashboard.as_ref(),
             self.appdata.as_ref(),
             self.copilot_status.as_ref(),
+            &mut self.debug_logs,
             &self.cpu_history,
             &self.mem_history,
             &mut |msg| {
@@ -1118,6 +1186,7 @@ impl eframe::App for KaageApp {
                 PaletteAction::OpenSettings => self.open_settings(),
                 PaletteAction::OpenAppDataSettings => self.open_appdata_settings(),
                 PaletteAction::OpenCopilot => self.open_copilot(),
+                PaletteAction::OpenDebugPanel => self.open_debug_panel(),
                 PaletteAction::NewTerminal => {
                     self.spawn_terminal_window("Terminal — shell".into(), None);
                 }

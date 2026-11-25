@@ -1,3 +1,4 @@
+use crate::debug_panel::DebugPanelWindow;
 use crate::dom_overlay::CopilotWindow;
 use crate::file_tracker::TrackerWindow;
 use crate::help::HelpWindow;
@@ -29,6 +30,7 @@ pub enum SavedPaneKind {
     Help,
     Settings,
     Copilot,
+    DebugPanel,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -100,6 +102,7 @@ impl SavedSession {
                             PaneKind::Help(_) => SavedPaneKind::Help,
                             PaneKind::Settings(_) => SavedPaneKind::Settings,
                             PaneKind::Copilot(_) => SavedPaneKind::Copilot,
+                            PaneKind::DebugPanel(_) => SavedPaneKind::DebugPanel,
                         },
                     })
                     .collect(),
@@ -214,6 +217,7 @@ impl SavedSession {
                     SavedPaneKind::Help => PaneKind::Help(HelpWindow::new()),
                     SavedPaneKind::Settings => PaneKind::Settings(SettingsWindow::new()),
                     SavedPaneKind::Copilot => PaneKind::Copilot(Box::new(CopilotWindow::new())),
+                    SavedPaneKind::DebugPanel => PaneKind::DebugPanel(DebugPanelWindow::new()),
                 };
                 tabs.push(BeTab {
                     id: tab_id,

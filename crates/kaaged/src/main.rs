@@ -1,5 +1,6 @@
 mod appdata;
 mod copilot;
+mod debug_log;
 mod files;
 mod nixos;
 mod telemetry;
@@ -56,6 +57,7 @@ struct AppState {
     vitals: Arc<vitals::VitalsCollector>,
     appdata: Arc<appdata::AppDataManager>,
     copilot: Arc<copilot::CopilotManager>,
+    debug_log: Arc<debug_log::DebugLogHub>,
     dist_dir: PathBuf,
 }
 
@@ -118,6 +120,7 @@ fn build_router(state: Arc<AppState>) -> Router {
         .route("/api/v1/dashboard", get(http_dashboard))
         .route("/api/v1/vitals", get(http_vitals))
         .route("/api/v1/appdata", get(http_appdata))
+        .route("/api/v1/debug/logs", get(http_debug_logs))
         .route("/api/v1/units", get(http_list_units))
         .route("/api/v1/units/{unit}", get(http_unit_status))
         .route("/api/v1/units/{unit}/status", get(http_unit_status))
@@ -131,12 +134,18 @@ fn build_router(state: Arc<AppState>) -> Router {
 
 #[tokio::main]
 async fn main() {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "kaaged=info,tower_http=info".into()),
-        )
-        .init();
+    let debug_log = debug_log::DebugLogHub::new();
+    {
+        use tracing_subscriber::layer::SubscriberExt;
+        use tracing_subscriber::util::SubscriberInitExt;
+        let filter = tracing_subscriber::EnvFilter::try_from_default_env()
+            .unwrap_or_else(|_| "kaaged=debug,pi_durable=debug,tower_http=info".into());
+        tracing_subscriber::registry()
+            .with(filter)
+            .with(tracing_subscriber::fmt::layer())
+            .with(debug_log::DebugLogLayer::new(Arc::clone(&debug_log)))
+            .init();
+    }
 
     let allowed_user = std::env::var("KAAGE_ALLOWED_USER")
         .ok()
@@ -212,6 +221,7 @@ async fn main() {
         vitals,
         appdata,
         copilot,
+        debug_log,
         dist_dir: dist_dir.clone(),
     });
 
@@ -355,6 +365,16 @@ async fn http_appdata(
         return (StatusCode::UNAUTHORIZED, "Unauthorized").into_response();
     }
     Json(state.appdata.snapshot()).into_response()
+}
+
+async fn http_debug_logs(
+    headers: HeaderMap,
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    if !check_auth(&headers, &state.allowed_user) {
+        return (StatusCode::UNAUTHORIZED, "Unauthorized").into_response();
+    }
+    Json(state.debug_log.snapshot()).into_response()
 }
 
 #[derive(Deserialize, Default)]
@@ -664,6 +684,17 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
         }
     });
 
+    // Forward live DebugLogEntry stream to this WebSocket client
+    let debug_tx = out_tx.clone();
+    let mut debug_rx = state.debug_log.subscribe();
+    let debug_task = tokio::spawn(async move {
+        while let Ok(entry) = debug_rx.recv().await {
+            if debug_tx.send(ServerMsg::DebugLogEntry(entry)).is_err() {
+                break;
+            }
+        }
+    });
+
     let ptys: Arc<Mutex<HashMap<u32, PtySession>>> = Arc::new(Mutex::new(HashMap::new()));
     let mut undo_stack: Vec<files::UndoRecord> = Vec::new();
 
@@ -885,6 +916,20 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
                         "Rejected".into()
                     },
                 });
+            }
+            ClientMsg::GetDebugLogs => {
+                let _ = out_tx.send(ServerMsg::DebugLogsSnapshot(state.debug_log.snapshot()));
+            }
+            ClientMsg::ClearDebugLogs => {
+                state.debug_log.clear();
+                let _ = out_tx.send(ServerMsg::DebugLogsSnapshot(Vec::new()));
+            }
+            ClientMsg::EmitDebugLog {
+                level,
+                module,
+                message,
+            } => {
+                state.debug_log.push(level, &module, message);
             }
             ClientMsg::GetUnitStatus { unit, scope } => {
                 let normalized = normalize_service_name(&unit);
@@ -1237,6 +1282,7 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
 
     // Kill and clean up any live PTY child processes on disconnect
     ptys.lock().unwrap().clear();
+    debug_task.abort();
     vitals_task.abort();
     dash_task.abort();
     metrics_task.abort();
@@ -1613,6 +1659,7 @@ mod tests {
             vitals: vitals::VitalsCollector::new(),
             appdata: appdata::AppDataManager::new(),
             copilot: copilot::CopilotManager::new("test-host".into()),
+            debug_log: debug_log::DebugLogHub::new(),
             dist_dir: PathBuf::from("dist"),
         })
     }

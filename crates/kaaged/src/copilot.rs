@@ -61,7 +61,7 @@ struct StoredLocalLlm {
     api_key: Option<String>,
 }
 
-#[derive(Default, serde::Serialize, serde::Deserialize)]
+#[derive(Default, Clone, serde::Serialize, serde::Deserialize)]
 struct SavedApiKeys {
     #[serde(default)]
     gemini: Option<String>,
@@ -160,6 +160,7 @@ struct ActiveTurn {
 struct CopilotCore {
     config: RwLock<CopilotConfig>,
     runtime_keys: RwLock<SavedApiKeys>,
+    disk_keys: RwLock<SavedApiKeys>,
     local_endpoints: RwLock<Vec<StoredLocalLlm>>,
     keys_file: PathBuf,
     local_llms_file: PathBuf,
@@ -227,6 +228,10 @@ impl CopilotCore {
                     .is_some_and(|k| !k.trim().is_empty()),
             })
             .collect();
+        let dk = self.disk_keys.read().unwrap_or_else(|e| e.into_inner());
+        let gemini_key_persisted = dk.gemini.as_deref().is_some_and(|s| !s.trim().is_empty());
+        let openai_key_persisted = dk.openai.as_deref().is_some_and(|s| !s.trim().is_empty());
+        let anthropic_key_persisted = dk.claude.as_deref().is_some_and(|s| !s.trim().is_empty());
         CopilotStatus {
             provider: cfg.provider,
             model: cfg.model.clone(),
@@ -236,6 +241,9 @@ impl CopilotCore {
             has_gemini_key: has_gemini,
             has_openai_key: has_openai,
             has_anthropic_key: has_anthropic,
+            gemini_key_persisted,
+            openai_key_persisted,
+            anthropic_key_persisted,
             local_endpoint: cfg.local_endpoint.clone(),
             local_endpoints,
             active_local_name: cfg.active_local_name.clone(),
@@ -897,7 +905,8 @@ impl CopilotManager {
                 local_endpoint,
                 active_local_name,
             }),
-            runtime_keys: RwLock::new(saved_keys),
+            runtime_keys: RwLock::new(saved_keys.clone()),
+            disk_keys: RwLock::new(saved_keys),
             local_endpoints: RwLock::new(saved_local_llms),
             keys_file,
             local_llms_file,
@@ -993,21 +1002,68 @@ impl CopilotManager {
                 CopilotProvider::Claude => rt.claude = val.clone(),
                 CopilotProvider::Local => rt.local = val.clone(),
             }
-            if persist {
-                if let Some(parent) = self.core.keys_file.parent() {
-                    let _ = fs::create_dir_all(parent);
+        }
+        {
+            // Per-provider disk persistence:
+            // - If forgetting (`val.is_none()`): always erase this provider's key from disk too.
+            // - If saving with `persist == true`: store this provider's key on disk (`0600`).
+            // - If saving with `persist == false`: keep in RAM only and clear any old disk entry for this provider.
+            let mut dk = self
+                .core
+                .disk_keys
+                .write()
+                .unwrap_or_else(|e| e.into_inner());
+            let disk_val = if persist { val } else { None };
+            let mut changed = false;
+            match provider {
+                CopilotProvider::Gemini => {
+                    if dk.gemini != disk_val {
+                        dk.gemini = disk_val;
+                        changed = true;
+                    }
                 }
-                let json = serde_json::to_string_pretty(&*rt).map_err(|e| e.to_string())?;
-                fs::write(&self.core.keys_file, json).map_err(|e| {
-                    format!("Failed to write {}: {e}", self.core.keys_file.display())
-                })?;
-                #[cfg(unix)]
-                {
-                    use std::os::unix::fs::PermissionsExt;
-                    let _ = fs::set_permissions(
-                        &self.core.keys_file,
-                        fs::Permissions::from_mode(0o600),
-                    );
+                CopilotProvider::OpenAi => {
+                    if dk.openai != disk_val {
+                        dk.openai = disk_val;
+                        changed = true;
+                    }
+                }
+                CopilotProvider::Claude => {
+                    if dk.claude != disk_val {
+                        dk.claude = disk_val;
+                        changed = true;
+                    }
+                }
+                CopilotProvider::Local => {
+                    if dk.local != disk_val {
+                        dk.local = disk_val;
+                        changed = true;
+                    }
+                }
+            }
+            if changed {
+                let any_disk = dk.gemini.is_some()
+                    || dk.openai.is_some()
+                    || dk.claude.is_some()
+                    || dk.local.is_some();
+                if any_disk {
+                    if let Some(parent) = self.core.keys_file.parent() {
+                        let _ = fs::create_dir_all(parent);
+                    }
+                    let json = serde_json::to_string_pretty(&*dk).map_err(|e| e.to_string())?;
+                    fs::write(&self.core.keys_file, json).map_err(|e| {
+                        format!("Failed to write {}: {e}", self.core.keys_file.display())
+                    })?;
+                    #[cfg(unix)]
+                    {
+                        use std::os::unix::fs::PermissionsExt;
+                        let _ = fs::set_permissions(
+                            &self.core.keys_file,
+                            fs::Permissions::from_mode(0o600),
+                        );
+                    }
+                } else if self.core.keys_file.exists() {
+                    let _ = fs::remove_file(&self.core.keys_file);
                 }
             }
         }
@@ -1120,8 +1176,12 @@ impl CopilotManager {
                 .unwrap_or_else(|e| e.into_inner());
             let before = list.len();
             list.retain(|e| !e.name.eq_ignore_ascii_case(name.trim()));
-            if list.len() != before && self.core.local_llms_file.exists() {
-                persist_local_llms(&self.core.local_llms_file, &list)?;
+            if list.len() != before {
+                if list.is_empty() && self.core.local_llms_file.exists() {
+                    let _ = fs::remove_file(&self.core.local_llms_file);
+                } else if self.core.local_llms_file.exists() {
+                    persist_local_llms(&self.core.local_llms_file, &list)?;
+                }
             }
         }
         {
@@ -1172,6 +1232,7 @@ impl CopilotManager {
         let cancel = CancelToken::new();
         let mut last_err = String::from("Could not reach endpoint");
         for probe_url in &candidate_urls {
+            tracing::debug!("Testing local LLM endpoint: {probe_url} (key_present={})", key.is_some());
             let mut req = PiHttpRequest::new("GET", probe_url.clone())
                 .timeout(Some(std::time::Duration::from_secs(8)));
             if let Some(ref k) = key {
@@ -1181,6 +1242,7 @@ impl CopilotManager {
                 Ok(resp) if resp.ok() => {
                     let body = resp.text().unwrap_or_default();
                     let models = parse_models_response(&body);
+                    tracing::info!("Local LLM endpoint reachable at {probe_url}: {} model(s)", models.len());
                     let msg = if models.is_empty() {
                         format!("Connected to {probe_url} (0 models returned)")
                     } else {

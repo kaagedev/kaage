@@ -1,3 +1,4 @@
+use crate::debug_panel::DebugPanelWindow;
 use crate::dom_overlay::{
     CopilotCrossAction, CopilotWindow, hide_copilot_overlay, is_dom_overlay_focused,
 };
@@ -17,9 +18,10 @@ use crate::theme::{TOPBAR_HEIGHT, draw_beos_bevel, palette};
 use crate::vitals::{VitalsSpawnRequest, VitalsWindow};
 use egui::{Color32, CornerRadius, Id, Key, Pos2, Rect, Sense, Stroke, Vec2};
 use kaage_proto::{
-    AppDataSnapshot, ClientMsg, ContainerInfo, CopilotStatus, DashboardSnapshot, NixosInfo,
-    SystemdUnitInfo, SystemdUnitStatus,
+    AppDataSnapshot, ClientMsg, ContainerInfo, CopilotStatus, DashboardSnapshot, DebugLogEntry,
+    NixosInfo, SystemdUnitInfo, SystemdUnitStatus,
 };
+use std::collections::VecDeque;
 
 pub const WORKSPACE_NAMES: [&str; 4] = ["1: Ops", "2: AI", "3: Files", "4: Logs"];
 
@@ -115,6 +117,7 @@ pub enum PaneKind {
     Help(HelpWindow),
     Settings(SettingsWindow),
     Copilot(Box<CopilotWindow>),
+    DebugPanel(DebugPanelWindow),
 }
 
 pub struct BeTab {
@@ -354,6 +357,7 @@ impl BeWindowManager {
         dashboard: Option<&DashboardSnapshot>,
         appdata: Option<&AppDataSnapshot>,
         copilot_status: Option<&CopilotStatus>,
+        debug_logs: &mut VecDeque<DebugLogEntry>,
         cpu_history: &[f32],
         mem_history: &[f32],
         send_msg: &mut dyn FnMut(ClientMsg),
@@ -891,6 +895,9 @@ impl BeWindowManager {
                                         );
                                         copilot_actions.extend(acts);
                                     }
+                                }
+                                PaneKind::DebugPanel(dbg) => {
+                                    dbg.ui(&mut child_ui, debug_logs, send_msg);
                                 }
                             }
                         }

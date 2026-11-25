@@ -36,6 +36,7 @@ pub enum PaletteAction {
     OpenSettings,
     OpenAppDataSettings,
     OpenCopilot,
+    OpenDebugPanel,
     NewTerminal,
     ToggleTheme,
     ToggleWallpaper,
@@ -262,6 +263,12 @@ fn build_items(
             category: "AI",
             shortcut: "✦".into(),
             action: PaletteAction::OpenCopilot,
+        },
+        PaletteItem {
+            label: "Open Debug Console (Unified Module & App Logs)".into(),
+            category: "DBG",
+            shortcut: "LOG".into(),
+            action: PaletteAction::OpenDebugPanel,
         },
         PaletteItem {
             label: "Open Kaage Vitals (Telemetry Cockpit)".into(),

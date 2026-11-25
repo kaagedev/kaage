@@ -24,6 +24,7 @@ pub struct SettingsWindow {
     pub local_name_input: String,
     pub local_url_input: String,
     pub local_key_input: String,
+    pub local_persist: bool,
     pub local_form_initialized: bool,
     pub local_testing: bool,
     pub local_test_result: Option<(bool, String)>,
@@ -31,7 +32,9 @@ pub struct SettingsWindow {
     pub gemini_key_input: String,
     pub openai_key_input: String,
     pub anthropic_key_input: String,
-    pub persist_keys_to_disk: bool,
+    pub persist_gemini_key: bool,
+    pub persist_openai_key: bool,
+    pub persist_anthropic_key: bool,
 }
 
 impl SettingsWindow {
@@ -46,6 +49,7 @@ impl SettingsWindow {
             local_name_input: String::new(),
             local_url_input: String::new(),
             local_key_input: String::new(),
+            local_persist: true,
             local_form_initialized: false,
             local_testing: false,
             local_test_result: None,
@@ -53,7 +57,9 @@ impl SettingsWindow {
             gemini_key_input: String::new(),
             openai_key_input: String::new(),
             anthropic_key_input: String::new(),
-            persist_keys_to_disk: false,
+            persist_gemini_key: false,
+            persist_openai_key: false,
+            persist_anthropic_key: false,
         }
     }
 
@@ -109,6 +115,9 @@ impl SettingsWindow {
                     .clone()
                     .unwrap_or_else(|| "Ollama Local".into());
             }
+            self.persist_gemini_key = st.gemini_key_persisted;
+            self.persist_openai_key = st.openai_key_persisted;
+            self.persist_anthropic_key = st.anthropic_key_persisted;
         }
 
         ui.horizontal_wrapped(|ui| {
@@ -257,8 +266,7 @@ impl SettingsWindow {
             });
 
         ui.add_space(10.0);
-        section_title(ui, "LOCAL LLM MODELS (OLLAMA / VLLM / LLAMA.CPP / LM STUDIO)");
-        let persist = self.persist_keys_to_disk;
+        section_title(ui, "LOCAL LLM CONNECTIONS (OLLAMA / VLLM / UNSLOTH / LM STUDIO)");
         egui::Frame::NONE
             .fill(p.well)
             .stroke(Stroke::new(1.0, p.border))
@@ -273,7 +281,7 @@ impl SettingsWindow {
                         ui.label(RichText::new("Name:").strong().color(p.text));
                         ui.add(
                             egui::TextEdit::singleline(&mut self.local_name_input)
-                                .hint_text("e.g. Ollama Local, vLLM RTX 5090")
+                                .hint_text("e.g. Ollama Local, Unsloth RTX 5090")
                                 .desired_width(280.0),
                         );
                         ui.end_row();
@@ -295,6 +303,14 @@ impl SettingsWindow {
                         );
                         ui.end_row();
                     });
+
+                ui.add_space(4.0);
+                ui.checkbox(
+                    &mut self.local_persist,
+                    RichText::new("Save local connection & auth key to disk ($KAAGE_APPDATA/kaage/copilot_local_llms.json, 0600)")
+                        .size(11.0)
+                        .color(p.text_muted),
+                );
 
                 ui.add_space(6.0);
                 ui.horizontal_wrapped(|ui| {
@@ -332,9 +348,16 @@ impl SettingsWindow {
                             name: self.local_name_input.trim().to_string(),
                             url: self.local_url_input.trim().to_string(),
                             api_key: key,
-                            persist,
+                            persist: self.local_persist,
                         });
                         self.local_key_input.clear();
+                    }
+                    if be_button(ui, "+ New Connection").clicked() {
+                        self.local_name_input.clear();
+                        self.local_url_input.clear();
+                        self.local_key_input.clear();
+                        self.local_test_result = None;
+                        self.local_discovered_models.clear();
                     }
                 });
 
@@ -366,6 +389,7 @@ impl SettingsWindow {
                     ui.add_space(3.0);
                     let current_model = status.map(|s| s.model.as_str()).unwrap_or("");
                     let models_clone = self.local_discovered_models.clone();
+                    let local_persist = self.local_persist;
                     ui.horizontal_wrapped(|ui| {
                         for model_id in models_clone {
                             let is_active =
@@ -381,13 +405,13 @@ impl SettingsWindow {
                                             name: self.local_name_input.trim().to_string(),
                                             url: self.local_url_input.trim().to_string(),
                                             api_key: Some(self.local_key_input.trim().to_string()),
-                                            persist,
+                                            persist: local_persist,
                                         });
                                     } else {
                                         send_msg(ClientMsg::SetCopilotApiKey {
                                             provider: CopilotProvider::Local,
                                             api_key: self.local_key_input.trim().to_string(),
-                                            persist,
+                                            persist: local_persist,
                                         });
                                     }
                                 }
@@ -409,10 +433,13 @@ impl SettingsWindow {
                     ui.add_space(8.0);
                     ui.separator();
                     ui.label(
-                        RichText::new("Saved Local Endpoints:")
-                            .size(11.0)
-                            .strong()
-                            .color(p.text_muted),
+                        RichText::new(format!(
+                            "Saved Local Connections ({}):",
+                            st.local_endpoints.len()
+                        ))
+                        .size(11.0)
+                        .strong()
+                        .color(p.text_muted),
                     );
                     ui.add_space(3.0);
                     for ep in &st.local_endpoints {
@@ -449,6 +476,11 @@ impl SettingsWindow {
                                     name: ep.name.clone(),
                                 });
                             }
+                            if be_button(ui, "Edit").clicked() {
+                                self.local_name_input = ep.name.clone();
+                                self.local_url_input = ep.url.clone();
+                                self.local_key_input.clear();
+                            }
                             if be_button(ui, "Test").clicked() && !self.local_testing {
                                 self.local_name_input = ep.name.clone();
                                 self.local_url_input = ep.url.clone();
@@ -471,20 +503,21 @@ impl SettingsWindow {
 
         ui.add_space(10.0);
         section_title(ui, "CLOUD PROVIDER API KEYS");
-        ui.horizontal_wrapped(|ui| {
-            ui.checkbox(
-                &mut self.persist_keys_to_disk,
-                RichText::new("Persist keys & local endpoints to $KAAGE_APPDATA/kaage/ (0600) — unchecked keeps them in daemon RAM only")
-                    .size(11.0)
-                    .color(p.text_muted),
-            );
-        });
+        ui.label(
+            RichText::new(
+                "Choose per provider whether to persist its key to disk (0600) or keep it in daemon RAM only. Forget removes the key from both RAM and disk.",
+            )
+            .size(11.0)
+            .color(p.text_muted),
+        );
         ui.add_space(4.0);
 
         let has_gemini = status.map(|s| s.has_gemini_key).unwrap_or(false);
         let has_openai = status.map(|s| s.has_openai_key).unwrap_or(false);
         let has_claude = status.map(|s| s.has_anthropic_key).unwrap_or(false);
-        let persist = self.persist_keys_to_disk;
+        let disk_gemini = status.map(|s| s.gemini_key_persisted).unwrap_or(false);
+        let disk_openai = status.map(|s| s.openai_key_persisted).unwrap_or(false);
+        let disk_claude = status.map(|s| s.anthropic_key_persisted).unwrap_or(false);
 
         egui::Frame::NONE
             .fill(p.well)
@@ -494,31 +527,37 @@ impl SettingsWindow {
                 ui.set_min_width(ui.available_width());
                 render_key_row(
                     ui,
+                    "Google Gemini",
                     "GEMINI_API_KEY",
                     CopilotProvider::Gemini,
                     has_gemini,
+                    disk_gemini,
                     &mut self.gemini_key_input,
-                    persist,
+                    &mut self.persist_gemini_key,
                     send_msg,
                 );
                 ui.separator();
                 render_key_row(
                     ui,
+                    "OpenAI",
                     "OPENAI_API_KEY",
                     CopilotProvider::OpenAi,
                     has_openai,
+                    disk_openai,
                     &mut self.openai_key_input,
-                    persist,
+                    &mut self.persist_openai_key,
                     send_msg,
                 );
                 ui.separator();
                 render_key_row(
                     ui,
+                    "Anthropic Claude",
                     "ANTHROPIC_API_KEY",
                     CopilotProvider::Claude,
                     has_claude,
+                    disk_claude,
                     &mut self.anthropic_key_input,
-                    persist,
+                    &mut self.persist_anthropic_key,
                     send_msg,
                 );
             });
@@ -704,51 +743,61 @@ impl SettingsWindow {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn render_key_row(
     ui: &mut Ui,
+    provider_label: &str,
     env_name: &str,
     provider: CopilotProvider,
     configured: bool,
+    persisted_on_disk: bool,
     buf: &mut String,
-    persist: bool,
+    persist: &mut bool,
     send_msg: &mut dyn FnMut(ClientMsg),
 ) {
     let p = palette();
+    let (badge_text, badge_color) = if persisted_on_disk {
+        ("● Saved on disk", p.status_green)
+    } else if configured {
+        ("● In RAM / env", p.accent)
+    } else {
+        ("● Missing", p.status_red)
+    };
     ui.horizontal_wrapped(|ui| {
-        ui.label(RichText::new(env_name).monospace().strong().color(p.text));
+        ui.label(RichText::new(provider_label).strong().color(p.text));
+        ui.label(RichText::new(env_name).monospace().size(10.5).color(p.text_muted));
         ui.label(
-            RichText::new(if configured {
-                "● Configured"
-            } else {
-                "● Missing"
-            })
-            .monospace()
-            .size(10.5)
-            .color(if configured {
-                p.status_green
-            } else {
-                p.status_red
-            }),
+            RichText::new(badge_text)
+                .monospace()
+                .size(10.5)
+                .color(badge_color),
         );
+    });
+    ui.horizontal_wrapped(|ui| {
         ui.add(
             egui::TextEdit::singleline(buf)
                 .password(true)
                 .hint_text("Paste API key...")
-                .desired_width(210.0),
+                .desired_width(240.0),
+        );
+        ui.checkbox(
+            persist,
+            RichText::new("Save to disk").size(11.0).color(p.text_muted),
         );
         if be_button(ui, "Set Key").clicked() && !buf.trim().is_empty() {
             send_msg(ClientMsg::SetCopilotApiKey {
                 provider,
                 api_key: buf.trim().to_string(),
-                persist,
+                persist: *persist,
             });
             buf.clear();
         }
-        if configured && be_button(ui, "Clear").clicked() {
+        if (configured || persisted_on_disk) && be_button(ui, "Forget Key").clicked() {
+            *persist = false;
             send_msg(ClientMsg::SetCopilotApiKey {
                 provider,
                 api_key: String::new(),
-                persist,
+                persist: false,
             });
         }
     });
