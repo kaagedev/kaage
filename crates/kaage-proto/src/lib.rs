@@ -602,6 +602,10 @@ pub struct CopilotStatus {
     pub local_endpoints: Vec<LocalLlmEndpoint>,
     pub active_local_name: Option<String>,
     pub flake_path: String,
+    pub default_provider: Option<CopilotProvider>,
+    pub default_model: Option<String>,
+    pub default_local_name: Option<String>,
+    pub default_local_endpoint: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -767,6 +771,12 @@ pub enum ClientMsg {
         target_node: Option<String>,
         local_endpoint: Option<String>,
     },
+    SetCopilotDefaultBackend {
+        provider: Option<CopilotProvider>,
+        model: Option<String>,
+        local_endpoint: Option<String>,
+        local_name: Option<String>,
+    },
     SetCopilotApiKey {
         provider: CopilotProvider,
         api_key: String,
@@ -919,6 +929,12 @@ mod tests {
                 rows: 24,
             },
             ClientMsg::ClosePty { session_id: 7 },
+            ClientMsg::SetCopilotDefaultBackend {
+                provider: Some(CopilotProvider::Local),
+                model: Some("gemma-4".into()),
+                local_endpoint: Some("http://127.0.0.1:8888/v1".into()),
+                local_name: Some("Unsloth".into()),
+            },
         ];
 
         for msg in messages {

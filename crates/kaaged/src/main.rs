@@ -797,6 +797,40 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
                 );
                 let _ = out_tx.send(ServerMsg::CopilotStatus(st));
             }
+            ClientMsg::SetCopilotDefaultBackend {
+                provider,
+                model,
+                local_endpoint,
+                local_name,
+            } => match state
+                .copilot
+                .set_default_backend(provider, model, local_endpoint, local_name)
+            {
+                Ok(st) => {
+                    let msg = if let Some(p) = st.default_provider {
+                        format!(
+                            "Default LLM set to {} ({})",
+                            p.label(),
+                            st.default_model.as_deref().unwrap_or(p.default_model())
+                        )
+                    } else {
+                        "Default LLM cleared (will resume last used)".into()
+                    };
+                    let _ = out_tx.send(ServerMsg::ActionFeedback {
+                        target: "Kaage Copilot".into(),
+                        ok: true,
+                        message: msg,
+                    });
+                    let _ = out_tx.send(ServerMsg::CopilotStatus(st));
+                }
+                Err(err) => {
+                    let _ = out_tx.send(ServerMsg::ActionFeedback {
+                        target: "Kaage Copilot".into(),
+                        ok: false,
+                        message: err,
+                    });
+                }
+            },
             ClientMsg::SetCopilotApiKey {
                 provider,
                 api_key,
@@ -931,6 +965,7 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
                 tokio::task::spawn_blocking(move || match copilot.clear_history() {
                     Ok(()) => {
                         let _ = tx.send(ServerMsg::CopilotHistory(Vec::new()));
+                        let _ = tx.send(ServerMsg::CopilotStatus(copilot.status()));
                         let _ = tx.send(ServerMsg::ActionFeedback {
                             target: "Kaage Copilot".into(),
                             ok: true,

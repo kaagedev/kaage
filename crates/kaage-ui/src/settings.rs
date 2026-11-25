@@ -263,6 +263,102 @@ impl SettingsWindow {
                         });
                     }
                 });
+
+                ui.add_space(6.0);
+                ui.separator();
+                ui.add_space(4.0);
+                let default_provider = status.and_then(|s| s.default_provider);
+                let default_model = status.and_then(|s| s.default_model.as_deref());
+                let default_local_name = status.and_then(|s| s.default_local_name.as_deref());
+                let default_local_ep = status.and_then(|s| s.default_local_endpoint.as_deref());
+                let current_is_default = status.is_some_and(|st| {
+                    st.default_provider == Some(st.provider)
+                        && st.default_model.as_deref() == Some(st.model.as_str())
+                        && (st.provider != CopilotProvider::Local
+                            || (st.default_local_endpoint.as_deref()
+                                == Some(st.local_endpoint.as_str())
+                                && st.default_local_name == st.active_local_name))
+                });
+                ui.horizontal_wrapped(|ui| {
+                    ui.label(
+                        RichText::new("Default Backend (Start & Resume):")
+                            .strong()
+                            .color(p.text),
+                    );
+                    if let Some(dp) = default_provider {
+                        let desc = if dp == CopilotProvider::Local {
+                            let ep_label = default_local_name
+                                .or(default_local_ep)
+                                .unwrap_or("Local");
+                            format!(
+                                "★ {} · {} · {}",
+                                dp.label(),
+                                ep_label,
+                                default_model.unwrap_or(dp.default_model())
+                            )
+                        } else {
+                            format!(
+                                "★ {} · {}",
+                                dp.label(),
+                                default_model.unwrap_or(dp.default_model())
+                            )
+                        };
+                        ui.label(
+                            RichText::new(desc)
+                                .monospace()
+                                .size(10.5)
+                                .color(p.status_green),
+                        );
+                    } else {
+                        ui.label(
+                            RichText::new("Auto (remembers last LLM used for chatting)")
+                                .monospace()
+                                .size(10.5)
+                                .color(p.text_muted),
+                        );
+                    }
+                });
+                ui.add_space(3.0);
+                ui.horizontal_wrapped(|ui| {
+                    let set_label = if current_is_default {
+                        "★ Current is Default"
+                    } else {
+                        "Set Current as Default"
+                    };
+                    if be_toggle_button(ui, set_label, current_is_default).clicked()
+                        && let Some(st) = status
+                    {
+                        let model = if !self.copilot_model_input.trim().is_empty() {
+                            self.copilot_model_input.trim().to_string()
+                        } else {
+                            st.model.clone()
+                        };
+                        send_msg(ClientMsg::SetCopilotDefaultBackend {
+                            provider: Some(st.provider),
+                            model: Some(model),
+                            local_endpoint: if st.provider == CopilotProvider::Local {
+                                Some(st.local_endpoint.clone())
+                            } else {
+                                None
+                            },
+                            local_name: if st.provider == CopilotProvider::Local {
+                                st.active_local_name.clone()
+                            } else {
+                                None
+                            },
+                        });
+                    }
+                    if default_provider.is_some()
+                        && be_button(ui, "Use Last Used Instead").clicked()
+                    {
+                        send_msg(ClientMsg::SetCopilotDefaultBackend {
+                            provider: None,
+                            model: None,
+                            local_endpoint: None,
+                            local_name: None,
+                        });
+                    }
+                });
             });
 
         ui.add_space(10.0);
@@ -445,6 +541,8 @@ impl SettingsWindow {
                     for ep in &st.local_endpoints {
                         let is_active = active_provider == CopilotProvider::Local
                             && st.active_local_name.as_deref() == Some(ep.name.as_str());
+                        let is_default = st.default_provider == Some(CopilotProvider::Local)
+                            && st.default_local_name.as_deref() == Some(ep.name.as_str());
                         ui.horizontal_wrapped(|ui| {
                             ui.label(
                                 RichText::new(&ep.name)
@@ -452,6 +550,14 @@ impl SettingsWindow {
                                     .strong()
                                     .color(if is_active { p.accent } else { p.text }),
                             );
+                            if is_default {
+                                ui.label(
+                                    RichText::new("★ Default")
+                                        .monospace()
+                                        .size(10.0)
+                                        .color(p.status_green),
+                                );
+                            }
                             ui.label(
                                 RichText::new(&ep.url)
                                     .monospace()

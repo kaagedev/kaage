@@ -73,6 +73,32 @@ struct SavedApiKeys {
     local: Option<String>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+struct DefaultLlmConfig {
+    provider: CopilotProvider,
+    model: String,
+    #[serde(default)]
+    local_endpoint: Option<String>,
+    #[serde(default)]
+    local_name: Option<String>,
+}
+
+#[derive(Default, Clone, Debug, serde::Serialize, serde::Deserialize)]
+struct PersistedCopilotConfig {
+    #[serde(default)]
+    default_backend: Option<DefaultLlmConfig>,
+    #[serde(default)]
+    last_provider: Option<CopilotProvider>,
+    #[serde(default)]
+    last_model: Option<String>,
+    #[serde(default)]
+    last_local_endpoint: Option<String>,
+    #[serde(default)]
+    last_local_name: Option<String>,
+    #[serde(default)]
+    trust_mode: Option<TrustMode>,
+}
+
 pub struct MemoryStore {
     conn: Mutex<Connection>,
 }
@@ -159,9 +185,11 @@ struct ActiveTurn {
 /// Shared state accessible by both `CopilotManager`, `KaageModels`, and `pi-durable` tool handlers.
 struct CopilotCore {
     config: RwLock<CopilotConfig>,
+    default_backend: RwLock<Option<DefaultLlmConfig>>,
     runtime_keys: RwLock<SavedApiKeys>,
     disk_keys: RwLock<SavedApiKeys>,
     local_endpoints: RwLock<Vec<StoredLocalLlm>>,
+    config_file: PathBuf,
     keys_file: PathBuf,
     local_llms_file: PathBuf,
     local_hostname: String,
@@ -232,6 +260,11 @@ impl CopilotCore {
         let gemini_key_persisted = dk.gemini.as_deref().is_some_and(|s| !s.trim().is_empty());
         let openai_key_persisted = dk.openai.as_deref().is_some_and(|s| !s.trim().is_empty());
         let anthropic_key_persisted = dk.claude.as_deref().is_some_and(|s| !s.trim().is_empty());
+        let def = self
+            .default_backend
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
         CopilotStatus {
             provider: cfg.provider,
             model: cfg.model.clone(),
@@ -248,7 +281,41 @@ impl CopilotCore {
             local_endpoints,
             active_local_name: cfg.active_local_name.clone(),
             flake_path: cfg.flake_path.clone(),
+            default_provider: def.as_ref().map(|d| d.provider),
+            default_model: def.as_ref().map(|d| d.model.clone()),
+            default_local_name: def.as_ref().and_then(|d| d.local_name.clone()),
+            default_local_endpoint: def.as_ref().and_then(|d| d.local_endpoint.clone()),
         }
+    }
+
+    fn persist_config(&self) -> Result<(), String> {
+        let cfg = self.config.read().unwrap_or_else(|e| e.into_inner());
+        let def = self
+            .default_backend
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        let persisted = PersistedCopilotConfig {
+            default_backend: def,
+            last_provider: Some(cfg.provider),
+            last_model: Some(cfg.model.clone()),
+            last_local_endpoint: Some(cfg.local_endpoint.clone()),
+            last_local_name: cfg.active_local_name.clone(),
+            trust_mode: Some(cfg.trust_mode),
+        };
+        drop(cfg);
+        if let Some(parent) = self.config_file.parent() {
+            let _ = fs::create_dir_all(parent);
+        }
+        let json = serde_json::to_string_pretty(&persisted).map_err(|e| e.to_string())?;
+        fs::write(&self.config_file, json)
+            .map_err(|e| format!("Failed to write {}: {e}", self.config_file.display()))?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = fs::set_permissions(&self.config_file, fs::Permissions::from_mode(0o600));
+        }
+        Ok(())
     }
 
     async fn request_approval(
@@ -872,7 +939,11 @@ pub struct CopilotManager {
 
 impl CopilotManager {
     pub fn new(local_hostname: String) -> Arc<Self> {
-        let provider = match std::env::var("KAAGE_COPILOT_PROVIDER")
+        Self::new_in_dir(local_hostname, crate::appdata::kaage_app_dir())
+    }
+
+    pub(crate) fn new_in_dir(local_hostname: String, kaage_dir: PathBuf) -> Arc<Self> {
+        let env_provider = match std::env::var("KAAGE_COPILOT_PROVIDER")
             .unwrap_or_default()
             .to_ascii_lowercase()
             .as_str()
@@ -882,12 +953,11 @@ impl CopilotManager {
             "local" | "ollama" => CopilotProvider::Local,
             _ => CopilotProvider::Gemini,
         };
-        let model = std::env::var("KAAGE_COPILOT_MODEL")
+        let env_model = std::env::var("KAAGE_COPILOT_MODEL")
             .ok()
             .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty())
-            .unwrap_or_else(|| provider.default_model().to_string());
-        let trust_mode = match std::env::var("KAAGE_COPILOT_TRUST_MODE")
+            .filter(|s| !s.is_empty());
+        let env_trust_mode = match std::env::var("KAAGE_COPILOT_TRUST_MODE")
             .unwrap_or_default()
             .to_ascii_lowercase()
             .as_str()
@@ -904,25 +974,72 @@ impl CopilotManager {
                     .display()
                     .to_string()
             });
-        let local_endpoint = std::env::var("KAAGE_COPILOT_LOCAL_ENDPOINT")
+        let env_local_endpoint = std::env::var("KAAGE_COPILOT_LOCAL_ENDPOINT")
             .ok()
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty())
             .unwrap_or_else(|| DEFAULT_LOCAL_ENDPOINT.to_string());
 
-        let kaage_dir = crate::appdata::kaage_app_dir();
         let db_path = kaage_dir.join("memory.db");
         let durable_db_path = kaage_dir.join("copilot_durable.db");
+        let config_file = kaage_dir.join("copilot_config.json");
         let keys_file = kaage_dir.join("copilot_keys.json");
         let local_llms_file = kaage_dir.join("copilot_local_llms.json");
-        let saved_keys: SavedApiKeys = fs::read_to_string(&keys_file)
+        let saved_config: PersistedCopilotConfig = fs::read_to_string(&config_file)
             .ok()
             .and_then(|raw| serde_json::from_str(&raw).ok())
             .unwrap_or_default();
+        let mut saved_keys: SavedApiKeys = fs::read_to_string(&keys_file)
+            .ok()
+            .and_then(|raw| serde_json::from_str(&raw).ok())
+            .unwrap_or_default();
+        let disk_keys = saved_keys.clone();
         let saved_local_llms: Vec<StoredLocalLlm> = fs::read_to_string(&local_llms_file)
             .ok()
             .and_then(|raw| serde_json::from_str(&raw).ok())
             .unwrap_or_default();
+
+        // Startup / resume backend precedence:
+        // 1. Explicit Default Backend set in Copilot Settings (used on start & resume)
+        // 2. Last LLM used for chatting / configured in Copilot
+        // 3. Environment variables / built-in defaults
+        let (provider, model, local_endpoint, mut active_local_name) =
+            if let Some(ref def) = saved_config.default_backend {
+                let ep = def
+                    .local_endpoint
+                    .clone()
+                    .filter(|s| !s.trim().is_empty())
+                    .or_else(|| {
+                        saved_config
+                            .last_local_endpoint
+                            .clone()
+                            .filter(|s| !s.trim().is_empty())
+                    })
+                    .unwrap_or_else(|| env_local_endpoint.clone());
+                let m = if def.model.trim().is_empty() {
+                    def.provider.default_model().to_string()
+                } else {
+                    def.model.clone()
+                };
+                (def.provider, m, ep, def.local_name.clone())
+            } else if let Some(last_prov) = saved_config.last_provider {
+                let ep = saved_config
+                    .last_local_endpoint
+                    .clone()
+                    .filter(|s| !s.trim().is_empty())
+                    .unwrap_or_else(|| env_local_endpoint.clone());
+                let m = saved_config
+                    .last_model
+                    .clone()
+                    .filter(|s| !s.trim().is_empty())
+                    .unwrap_or_else(|| last_prov.default_model().to_string());
+                (last_prov, m, ep, saved_config.last_local_name.clone())
+            } else {
+                let m = env_model.unwrap_or_else(|| env_provider.default_model().to_string());
+                (env_provider, m, env_local_endpoint, None)
+            };
+
+        let trust_mode = saved_config.trust_mode.unwrap_or(env_trust_mode);
 
         let memory = match MemoryStore::open(&db_path) {
             Ok(store) => {
@@ -938,10 +1055,19 @@ impl CopilotManager {
             }
         };
 
-        let active_local_name = saved_local_llms
-            .iter()
-            .find(|e| normalize_openai_base_url(&e.url) == normalize_openai_base_url(&local_endpoint))
-            .map(|e| e.name.clone());
+        if let Some(matched) = saved_local_llms.iter().find(|e| {
+            active_local_name
+                .as_deref()
+                .is_some_and(|n| e.name.eq_ignore_ascii_case(n))
+                || normalize_openai_base_url(&e.url) == normalize_openai_base_url(&local_endpoint)
+        }) {
+            if active_local_name.is_none() {
+                active_local_name = Some(matched.name.clone());
+            }
+            if provider == CopilotProvider::Local && saved_keys.local.is_none() {
+                saved_keys.local = matched.api_key.clone();
+            }
+        }
 
         let core = Arc::new(CopilotCore {
             config: RwLock::new(CopilotConfig {
@@ -953,9 +1079,11 @@ impl CopilotManager {
                 local_endpoint,
                 active_local_name,
             }),
-            runtime_keys: RwLock::new(saved_keys.clone()),
-            disk_keys: RwLock::new(saved_keys),
+            default_backend: RwLock::new(saved_config.default_backend),
+            runtime_keys: RwLock::new(saved_keys),
+            disk_keys: RwLock::new(disk_keys),
             local_endpoints: RwLock::new(saved_local_llms),
+            config_file,
             keys_file,
             local_llms_file,
             local_hostname,
@@ -1179,6 +1307,7 @@ impl CopilotManager {
     }
 
     /// Reset the durable root conversation so the user starts a fresh chat session.
+    /// If a default LLM backend is configured in Copilot Settings, activates it for the fresh session.
     pub fn clear_history(&self) -> Result<(), String> {
         let cancel = CancelToken::new();
         let root = self
@@ -1188,7 +1317,129 @@ impl CopilotManager {
         root.reset(None, &cancel)
             .map_err(|e| format!("Failed to reset conversation: {e}"))?;
         let _ = root.wait_for_idle(&cancel);
+
+        if let Some(def) = self
+            .core
+            .default_backend
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+        {
+            let matched_key = if def.provider == CopilotProvider::Local {
+                let target_base = def
+                    .local_endpoint
+                    .as_deref()
+                    .map(normalize_openai_base_url);
+                self.core
+                    .local_endpoints
+                    .read()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .iter()
+                    .find(|e| {
+                        def.local_name
+                            .as_deref()
+                            .is_some_and(|n| e.name.eq_ignore_ascii_case(n))
+                            || target_base
+                                .as_deref()
+                                .is_some_and(|b| normalize_openai_base_url(&e.url) == b)
+                    })
+                    .and_then(|e| e.api_key.clone())
+            } else {
+                None
+            };
+            {
+                let mut cfg = self.core.config.write().unwrap_or_else(|e| e.into_inner());
+                cfg.provider = def.provider;
+                cfg.model = def.model.clone();
+                if let Some(ep) = def.local_endpoint.filter(|s| !s.trim().is_empty()) {
+                    cfg.local_endpoint = ep;
+                }
+                if def.provider == CopilotProvider::Local {
+                    cfg.active_local_name = def.local_name;
+                }
+            }
+            if let Some(k) = matched_key {
+                self.core
+                    .runtime_keys
+                    .write()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .local = Some(k);
+            }
+            let _ = root.configure(
+                &AgentChange {
+                    model: Change::Set(ModelRef {
+                        provider: provider_slug(def.provider).to_string(),
+                        model_id: def.model,
+                    }),
+                    ..Default::default()
+                },
+                &cancel,
+            );
+            let _ = self.core.persist_config();
+        }
         Ok(())
+    }
+
+    /// Pin or clear the default LLM backend used when starting or resuming Copilot sessions.
+    pub fn set_default_backend(
+        &self,
+        provider: Option<CopilotProvider>,
+        model: Option<String>,
+        local_endpoint: Option<String>,
+        local_name: Option<String>,
+    ) -> Result<CopilotStatus, String> {
+        if let Some(p) = provider {
+            let clean_model = model
+                .map(|m| m.trim().to_string())
+                .filter(|m| !m.is_empty())
+                .unwrap_or_else(|| p.default_model().to_string());
+            let clean_ep = local_endpoint
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty());
+            let clean_name = local_name
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty());
+
+            let def = DefaultLlmConfig {
+                provider: p,
+                model: clean_model.clone(),
+                local_endpoint: if p == CopilotProvider::Local {
+                    clean_ep.clone()
+                } else {
+                    None
+                },
+                local_name: if p == CopilotProvider::Local {
+                    clean_name.clone()
+                } else {
+                    None
+                },
+            };
+            *self
+                .core
+                .default_backend
+                .write()
+                .unwrap_or_else(|e| e.into_inner()) = Some(def);
+
+            {
+                let mut cfg = self.core.config.write().unwrap_or_else(|e| e.into_inner());
+                cfg.provider = p;
+                cfg.model = clean_model;
+                if let Some(ep) = clean_ep {
+                    cfg.local_endpoint = ep;
+                }
+                if p == CopilotProvider::Local && clean_name.is_some() {
+                    cfg.active_local_name = clean_name;
+                }
+            }
+        } else {
+            *self
+                .core
+                .default_backend
+                .write()
+                .unwrap_or_else(|e| e.into_inner()) = None;
+        }
+        self.core.persist_config()?;
+        Ok(self.status())
     }
 
     pub fn upsert_local_llm(
@@ -1254,6 +1505,7 @@ impl CopilotManager {
                 .unwrap_or_else(|e| e.into_inner());
             rt.local = effective_key;
         }
+        let _ = self.core.persist_config();
         Ok(self.status())
     }
 
@@ -1281,6 +1533,7 @@ impl CopilotManager {
                 .unwrap_or_else(|e| e.into_inner());
             rt.local = found.api_key;
         }
+        let _ = self.core.persist_config();
         Ok(self.status())
     }
 
@@ -1311,6 +1564,21 @@ impl CopilotManager {
                 cfg.active_local_name = None;
             }
         }
+        {
+            let mut def = self
+                .core
+                .default_backend
+                .write()
+                .unwrap_or_else(|e| e.into_inner());
+            if let Some(d) = def.as_mut()
+                && d.local_name
+                    .as_deref()
+                    .is_some_and(|a| a.eq_ignore_ascii_case(name.trim()))
+            {
+                d.local_name = None;
+            }
+        }
+        let _ = self.core.persist_config();
         Ok(self.status())
     }
 
@@ -1436,6 +1704,7 @@ impl CopilotManager {
                 cfg.local_endpoint = ep.trim().to_string();
             }
         }
+        let _ = self.core.persist_config();
         self.status()
     }
 
@@ -1484,6 +1753,8 @@ impl CopilotManager {
         let handle = tokio::runtime::Handle::current();
         tokio::spawn(async move {
             let _guard = mgr.turn_lock.lock().await;
+            // Persist the active LLM so Copilot remembers the last LLM used for chatting across restarts.
+            let _ = mgr.core.persist_config();
             let status = mgr.status();
             let api_key = mgr.core.effective_api_key(status.provider);
             if status.provider != CopilotProvider::Local && api_key.is_none() {
@@ -2246,5 +2517,113 @@ mod tests {
             normalize_openai_base_url("http://127.0.0.1:11434/v1/chat/completions/"),
             "http://127.0.0.1:11434/v1"
         );
+    }
+
+    #[test]
+    fn remembers_last_used_llm_and_default_backend_across_restart() {
+        let dir = std::env::temp_dir().join(format!(
+            "kaage_copilot_cfg_persist_test_{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+
+        // 1. Without a pinned default, switching LLM persists as last-used and resumes on restart.
+        {
+            let mgr = CopilotManager::new_in_dir("test-host".into(), dir.clone());
+            mgr.upsert_local_llm(
+                "Unsloth".into(),
+                "http://127.0.0.1:8888/v1".into(),
+                Some("secret-key".into()),
+                true,
+            )
+            .unwrap();
+            let st = mgr.update_config(
+                Some(CopilotProvider::Local),
+                Some("gemma-4-test".into()),
+                Some(TrustMode::Monitored),
+                None,
+                None,
+            );
+            assert_eq!(st.provider, CopilotProvider::Local);
+            assert_eq!(st.model, "gemma-4-test");
+            assert_eq!(st.active_local_name.as_deref(), Some("Unsloth"));
+        }
+
+        {
+            let mgr2 = CopilotManager::new_in_dir("test-host".into(), dir.clone());
+            let st2 = mgr2.status();
+            assert_eq!(st2.provider, CopilotProvider::Local);
+            assert_eq!(st2.model, "gemma-4-test");
+            assert_eq!(st2.local_endpoint, "http://127.0.0.1:8888/v1");
+            assert_eq!(st2.active_local_name.as_deref(), Some("Unsloth"));
+            assert_eq!(st2.trust_mode, TrustMode::Monitored);
+            assert_eq!(st2.default_provider, None);
+
+            // 2. Pinning a default backend uses it on start/resume and after clear_history even if
+            //    the user temporarily switched to another LLM.
+            let st_def = mgr2
+                .set_default_backend(
+                    Some(CopilotProvider::Local),
+                    Some("gemma-4-test".into()),
+                    Some("http://127.0.0.1:8888/v1".into()),
+                    Some("Unsloth".into()),
+                )
+                .unwrap();
+            assert_eq!(st_def.default_provider, Some(CopilotProvider::Local));
+            assert_eq!(st_def.default_model.as_deref(), Some("gemma-4-test"));
+
+            // Temporarily switch to OpenAI
+            let st_tmp = mgr2.update_config(
+                Some(CopilotProvider::OpenAi),
+                Some("gpt-4o".into()),
+                None,
+                None,
+                None,
+            );
+            assert_eq!(st_tmp.provider, CopilotProvider::OpenAi);
+
+            // Clearing history restores the configured default backend
+            mgr2.clear_history().unwrap();
+            let st_cleared = mgr2.status();
+            assert_eq!(st_cleared.provider, CopilotProvider::Local);
+            assert_eq!(st_cleared.model, "gemma-4-test");
+
+            // Switch to Claude right before restart; pinned default should still win on start/resume
+            mgr2.update_config(
+                Some(CopilotProvider::Claude),
+                Some("claude-sonnet-4-20250514".into()),
+                None,
+                None,
+                None,
+            );
+        }
+
+        {
+            let mgr3 = CopilotManager::new_in_dir("test-host".into(), dir.clone());
+            let st3 = mgr3.status();
+            assert_eq!(st3.provider, CopilotProvider::Local);
+            assert_eq!(st3.model, "gemma-4-test");
+            assert_eq!(st3.default_provider, Some(CopilotProvider::Local));
+
+            // 3. Clearing the default falls back to last-used LLM on next restart.
+            mgr3.set_default_backend(None, None, None, None).unwrap();
+            mgr3.update_config(
+                Some(CopilotProvider::OpenAi),
+                Some("gpt-4o-mini".into()),
+                None,
+                None,
+                None,
+            );
+        }
+
+        {
+            let mgr4 = CopilotManager::new_in_dir("test-host".into(), dir.clone());
+            let st4 = mgr4.status();
+            assert_eq!(st4.provider, CopilotProvider::OpenAi);
+            assert_eq!(st4.model, "gpt-4o-mini");
+            assert_eq!(st4.default_provider, None);
+        }
+
+        let _ = fs::remove_dir_all(&dir);
     }
 }
