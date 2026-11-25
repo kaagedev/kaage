@@ -1,8 +1,9 @@
 use kaage_proto::{
-    CopilotCard, CopilotProvider, CopilotStatus, NixosInfo, ServerMsg, TrustMode, VitalsQuery,
-    VitalsWindow,
+    CopilotCard, CopilotProvider, CopilotStatus, LocalLlmEndpoint, NixosInfo, ServerMsg,
+    TrustMode, VitalsQuery, VitalsWindow,
 };
 use pi_durable::ai::event_stream::AssistantMessageEventStream;
+use pi_durable::ai::http::{Request as PiHttpRequest, send as pi_http_send};
 use pi_durable::ai::models::{Models, ModelsError};
 use pi_durable::ai::registry::{Auth, Providers};
 use pi_durable::ai::types::{
@@ -49,6 +50,15 @@ pub struct CopilotConfig {
     pub target_node: String,
     pub flake_path: String,
     pub local_endpoint: String,
+    pub active_local_name: Option<String>,
+}
+
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+struct StoredLocalLlm {
+    name: String,
+    url: String,
+    #[serde(default)]
+    api_key: Option<String>,
 }
 
 #[derive(Default, serde::Serialize, serde::Deserialize)]
@@ -150,7 +160,9 @@ struct ActiveTurn {
 struct CopilotCore {
     config: RwLock<CopilotConfig>,
     runtime_keys: RwLock<SavedApiKeys>,
+    local_endpoints: RwLock<Vec<StoredLocalLlm>>,
     keys_file: PathBuf,
+    local_llms_file: PathBuf,
     local_hostname: String,
     memory: Option<Arc<MemoryStore>>,
     pending_confirms: Mutex<HashMap<String, oneshot::Sender<bool>>>,
@@ -170,7 +182,24 @@ impl CopilotCore {
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .map(str::to_string);
-        from_rt.or_else(|| resolve_api_key_from_env(provider))
+        if from_rt.is_some() {
+            return from_rt;
+        }
+        if provider == CopilotProvider::Local {
+            let cfg = self.config.read().unwrap_or_else(|e| e.into_inner());
+            let target_base = normalize_openai_base_url(&cfg.local_endpoint);
+            let list = self.local_endpoints.read().unwrap_or_else(|e| e.into_inner());
+            if let Some(found) = list.iter().find(|e| {
+                cfg.active_local_name
+                    .as_deref()
+                    .is_some_and(|n| e.name.eq_ignore_ascii_case(n))
+                    || normalize_openai_base_url(&e.url) == target_base
+            }) && let Some(k) = found.api_key.as_deref().map(str::trim).filter(|s| !s.is_empty())
+            {
+                return Some(k.to_string());
+            }
+        }
+        resolve_api_key_from_env(provider)
     }
 
     fn status(&self) -> CopilotStatus {
@@ -184,6 +213,20 @@ impl CopilotCore {
             CopilotProvider::Claude => has_anthropic,
             CopilotProvider::Local => !cfg.local_endpoint.trim().is_empty(),
         };
+        let local_endpoints: Vec<LocalLlmEndpoint> = self
+            .local_endpoints
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .map(|e| LocalLlmEndpoint {
+                name: e.name.clone(),
+                url: e.url.clone(),
+                has_key: e
+                    .api_key
+                    .as_deref()
+                    .is_some_and(|k| !k.trim().is_empty()),
+            })
+            .collect();
         CopilotStatus {
             provider: cfg.provider,
             model: cfg.model.clone(),
@@ -194,6 +237,8 @@ impl CopilotCore {
             has_openai_key: has_openai,
             has_anthropic_key: has_anthropic,
             local_endpoint: cfg.local_endpoint.clone(),
+            local_endpoints,
+            active_local_name: cfg.active_local_name.clone(),
             flake_path: cfg.flake_path.clone(),
         }
     }
@@ -618,10 +663,12 @@ fn provider_from_slug(slug: &str) -> Option<CopilotProvider> {
 
 fn normalize_openai_base_url(endpoint: &str) -> String {
     let trimmed = endpoint.trim().trim_end_matches('/');
-    trimmed
-        .strip_suffix("/chat/completions")
-        .unwrap_or(trimmed)
-        .to_string()
+    for suffix in ["/chat/completions", "/completions", "/models", "/api/tags"] {
+        if let Some(base) = trimmed.strip_suffix(suffix) {
+            return base.trim_end_matches('/').to_string();
+        }
+    }
+    trimmed.to_string()
 }
 
 /// Bridges `pi-durable`'s `Providers` with Kaage's dynamic runtime keys, custom model IDs,
@@ -811,7 +858,12 @@ impl CopilotManager {
         let db_path = kaage_dir.join("memory.db");
         let durable_db_path = kaage_dir.join("copilot_durable.db");
         let keys_file = kaage_dir.join("copilot_keys.json");
+        let local_llms_file = kaage_dir.join("copilot_local_llms.json");
         let saved_keys: SavedApiKeys = fs::read_to_string(&keys_file)
+            .ok()
+            .and_then(|raw| serde_json::from_str(&raw).ok())
+            .unwrap_or_default();
+        let saved_local_llms: Vec<StoredLocalLlm> = fs::read_to_string(&local_llms_file)
             .ok()
             .and_then(|raw| serde_json::from_str(&raw).ok())
             .unwrap_or_default();
@@ -830,6 +882,11 @@ impl CopilotManager {
             }
         };
 
+        let active_local_name = saved_local_llms
+            .iter()
+            .find(|e| normalize_openai_base_url(&e.url) == normalize_openai_base_url(&local_endpoint))
+            .map(|e| e.name.clone());
+
         let core = Arc::new(CopilotCore {
             config: RwLock::new(CopilotConfig {
                 provider,
@@ -838,9 +895,12 @@ impl CopilotManager {
                 target_node: local_hostname.clone(),
                 flake_path,
                 local_endpoint,
+                active_local_name,
             }),
             runtime_keys: RwLock::new(saved_keys),
+            local_endpoints: RwLock::new(saved_local_llms),
             keys_file,
+            local_llms_file,
             local_hostname,
             memory,
             pending_confirms: Mutex::new(HashMap::new()),
@@ -956,6 +1016,205 @@ impl CopilotManager {
 
     pub fn status(&self) -> CopilotStatus {
         self.core.status()
+    }
+
+    pub fn upsert_local_llm(
+        &self,
+        name: String,
+        url: String,
+        api_key: Option<String>,
+        persist: bool,
+    ) -> Result<CopilotStatus, String> {
+        let name = name.trim().to_string();
+        let url = url.trim().to_string();
+        if name.is_empty() {
+            return Err("Endpoint name cannot be empty".into());
+        }
+        if url.is_empty() || (!url.starts_with("http://") && !url.starts_with("https://")) {
+            return Err("Endpoint URL must start with http:// or https://".into());
+        }
+        let clean_key = api_key
+            .map(|k| k.trim().to_string())
+            .filter(|k| !k.is_empty());
+
+        let effective_key = {
+            let mut list = self
+                .core
+                .local_endpoints
+                .write()
+                .unwrap_or_else(|e| e.into_inner());
+            if let Some(existing) = list.iter_mut().find(|e| e.name.eq_ignore_ascii_case(&name)) {
+                existing.name = name.clone();
+                existing.url = url.clone();
+                if clean_key.is_some() {
+                    existing.api_key = clean_key.clone();
+                }
+                let k = existing.api_key.clone();
+                if persist {
+                    persist_local_llms(&self.core.local_llms_file, &list)?;
+                }
+                k
+            } else {
+                list.push(StoredLocalLlm {
+                    name: name.clone(),
+                    url: url.clone(),
+                    api_key: clean_key.clone(),
+                });
+                if persist {
+                    persist_local_llms(&self.core.local_llms_file, &list)?;
+                }
+                clean_key
+            }
+        };
+
+        {
+            let mut cfg = self.core.config.write().unwrap_or_else(|e| e.into_inner());
+            cfg.provider = CopilotProvider::Local;
+            cfg.local_endpoint = url;
+            cfg.active_local_name = Some(name);
+        }
+        {
+            let mut rt = self
+                .core
+                .runtime_keys
+                .write()
+                .unwrap_or_else(|e| e.into_inner());
+            rt.local = effective_key;
+        }
+        Ok(self.status())
+    }
+
+    pub fn select_local_llm(&self, name: &str) -> Result<CopilotStatus, String> {
+        let found = self
+            .core
+            .local_endpoints
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .find(|e| e.name.eq_ignore_ascii_case(name.trim()))
+            .cloned()
+            .ok_or_else(|| format!("Local endpoint `{name}` not found"))?;
+        {
+            let mut cfg = self.core.config.write().unwrap_or_else(|e| e.into_inner());
+            cfg.provider = CopilotProvider::Local;
+            cfg.local_endpoint = found.url;
+            cfg.active_local_name = Some(found.name);
+        }
+        {
+            let mut rt = self
+                .core
+                .runtime_keys
+                .write()
+                .unwrap_or_else(|e| e.into_inner());
+            rt.local = found.api_key;
+        }
+        Ok(self.status())
+    }
+
+    pub fn delete_local_llm(&self, name: &str) -> Result<CopilotStatus, String> {
+        {
+            let mut list = self
+                .core
+                .local_endpoints
+                .write()
+                .unwrap_or_else(|e| e.into_inner());
+            let before = list.len();
+            list.retain(|e| !e.name.eq_ignore_ascii_case(name.trim()));
+            if list.len() != before && self.core.local_llms_file.exists() {
+                persist_local_llms(&self.core.local_llms_file, &list)?;
+            }
+        }
+        {
+            let mut cfg = self.core.config.write().unwrap_or_else(|e| e.into_inner());
+            if cfg
+                .active_local_name
+                .as_deref()
+                .is_some_and(|a| a.eq_ignore_ascii_case(name.trim()))
+            {
+                cfg.active_local_name = None;
+            }
+        }
+        Ok(self.status())
+    }
+
+    /// Test connectivity to a local OpenAI-compatible / Ollama endpoint and pull its available models.
+    pub fn test_local_llm(&self, url: String, api_key: Option<String>) -> ServerMsg {
+        let trimmed = url.trim().to_string();
+        if trimmed.is_empty() || (!trimmed.starts_with("http://") && !trimmed.starts_with("https://"))
+        {
+            return ServerMsg::LocalLlmTestResult {
+                ok: false,
+                url: trimmed,
+                message: "URL must start with http:// or https://".into(),
+                models: Vec::new(),
+            };
+        }
+        let key = api_key
+            .map(|k| k.trim().to_string())
+            .filter(|k| !k.is_empty())
+            .or_else(|| self.core.effective_api_key(CopilotProvider::Local));
+
+        let base = normalize_openai_base_url(&trimmed);
+        let mut candidate_urls = Vec::new();
+        if base.ends_with("/models") {
+            candidate_urls.push(base.clone());
+        } else if base.ends_with("/v1") {
+            candidate_urls.push(format!("{base}/models"));
+            if let Some(root) = base.strip_suffix("/v1") {
+                candidate_urls.push(format!("{root}/api/tags"));
+            }
+        } else {
+            candidate_urls.push(format!("{base}/v1/models"));
+            candidate_urls.push(format!("{base}/models"));
+            candidate_urls.push(format!("{base}/api/tags"));
+        }
+
+        let cancel = CancelToken::new();
+        let mut last_err = String::from("Could not reach endpoint");
+        for probe_url in &candidate_urls {
+            let mut req = PiHttpRequest::new("GET", probe_url.clone())
+                .timeout(Some(std::time::Duration::from_secs(8)));
+            if let Some(ref k) = key {
+                req = req.header("Authorization", format!("Bearer {k}"));
+            }
+            match pi_http_send(&req, Some(&cancel)) {
+                Ok(resp) if resp.ok() => {
+                    let body = resp.text().unwrap_or_default();
+                    let models = parse_models_response(&body);
+                    let msg = if models.is_empty() {
+                        format!("Connected to {probe_url} (0 models returned)")
+                    } else {
+                        format!("Connected — {} model(s) available", models.len())
+                    };
+                    return ServerMsg::LocalLlmTestResult {
+                        ok: true,
+                        url: trimmed,
+                        message: msg,
+                        models,
+                    };
+                }
+                Ok(resp) => {
+                    let status = resp.status;
+                    let snippet: String = resp
+                        .text()
+                        .unwrap_or_default()
+                        .chars()
+                        .take(180)
+                        .collect();
+                    last_err = format!("HTTP {status} from {probe_url}: {}", snippet.trim());
+                }
+                Err(err) => {
+                    last_err = format!("{probe_url}: {err}");
+                }
+            }
+        }
+
+        ServerMsg::LocalLlmTestResult {
+            ok: false,
+            url: trimmed,
+            message: last_err,
+            models: Vec::new(),
+        }
     }
 
     pub fn update_config(
@@ -1403,6 +1662,54 @@ fn build_kaage_extension(core: Arc<CopilotCore>) -> Extension {
     }
 }
 
+fn persist_local_llms(path: &Path, list: &[StoredLocalLlm]) -> Result<(), String> {
+    if let Some(parent) = path.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    let json = serde_json::to_string_pretty(list).map_err(|e| e.to_string())?;
+    fs::write(path, json).map_err(|e| format!("Failed to write {}: {e}", path.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = fs::set_permissions(path, fs::Permissions::from_mode(0o600));
+    }
+    Ok(())
+}
+
+/// Parse model IDs from OpenAI `/v1/models` (`{ data: [{ id }] }`) or Ollama `/api/tags` (`{ models: [{ name }] }`).
+pub fn parse_models_response(body: &str) -> Vec<String> {
+    let Ok(val) = serde_json::from_str::<Value>(body) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    if let Some(arr) = val.get("data").and_then(Value::as_array) {
+        for item in arr {
+            if let Some(id) = item.get("id").and_then(Value::as_str)
+                && !id.trim().is_empty()
+            {
+                out.push(id.trim().to_string());
+            }
+        }
+    }
+    if out.is_empty()
+        && let Some(arr) = val.get("models").and_then(Value::as_array)
+    {
+        for item in arr {
+            if let Some(name) = item
+                .get("name")
+                .or_else(|| item.get("id"))
+                .and_then(Value::as_str)
+                && !name.trim().is_empty()
+            {
+                out.push(name.trim().to_string());
+            }
+        }
+    }
+    out.sort();
+    out.dedup();
+    out
+}
+
 fn resolve_api_key_from_env(provider: CopilotProvider) -> Option<String> {
     let (env_var, file_var, cred_name) = match provider {
         CopilotProvider::Gemini => (
@@ -1732,5 +2039,29 @@ mod tests {
         assert!(found, "durable reply should persist across Harness reopen");
         harness2.close(&cancel).unwrap();
         let _ = fs::remove_file(&db);
+    }
+
+    #[test]
+    fn parses_openai_and_ollama_model_listings() {
+        let openai_json = r#"{"object":"list","data":[{"id":"qwen3:30b"},{"id":"llama3.3:70b"},{"id":"qwen3:30b"}]}"#;
+        assert_eq!(
+            parse_models_response(openai_json),
+            vec!["llama3.3:70b".to_string(), "qwen3:30b".to_string()]
+        );
+
+        let ollama_json = r#"{"models":[{"name":"deepseek-r1:32b"},{"name":"gemma3:27b"}]}"#;
+        assert_eq!(
+            parse_models_response(ollama_json),
+            vec!["deepseek-r1:32b".to_string(), "gemma3:27b".to_string()]
+        );
+
+        assert_eq!(
+            normalize_openai_base_url("http://127.0.0.1:8888/v1/completions"),
+            "http://127.0.0.1:8888/v1"
+        );
+        assert_eq!(
+            normalize_openai_base_url("http://127.0.0.1:11434/v1/chat/completions/"),
+            "http://127.0.0.1:11434/v1"
+        );
     }
 }

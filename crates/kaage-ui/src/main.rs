@@ -831,6 +831,30 @@ impl eframe::App for KaageApp {
                                     }
                                 }
                             }
+                            ServerMsg::LocalLlmTestResult {
+                                ok,
+                                url: _,
+                                message,
+                                models,
+                            } => {
+                                for g in &mut self.wm.groups {
+                                    for t in &mut g.tabs {
+                                        if let PaneKind::Settings(s) = &mut t.kind {
+                                            s.on_local_llm_test_result(
+                                                ok,
+                                                message.clone(),
+                                                models.clone(),
+                                            );
+                                        }
+                                    }
+                                }
+                                self.toast = Some(ToastNotice {
+                                    ok,
+                                    text: format!("Local LLM: {message}"),
+                                    expires_at: now + 5.0,
+                                    undo_msg: None,
+                                });
+                            }
                         }
                     }
                 }

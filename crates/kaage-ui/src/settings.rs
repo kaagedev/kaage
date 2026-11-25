@@ -20,8 +20,14 @@ pub struct SettingsWindow {
     pub appdata_dirty: bool,
     pub new_app_name: String,
     pub copilot_model_input: String,
-    pub copilot_endpoint_input: String,
     pub copilot_fields_dirty: bool,
+    pub local_name_input: String,
+    pub local_url_input: String,
+    pub local_key_input: String,
+    pub local_form_initialized: bool,
+    pub local_testing: bool,
+    pub local_test_result: Option<(bool, String)>,
+    pub local_discovered_models: Vec<String>,
     pub gemini_key_input: String,
     pub openai_key_input: String,
     pub anthropic_key_input: String,
@@ -36,12 +42,26 @@ impl SettingsWindow {
             appdata_dirty: false,
             new_app_name: String::new(),
             copilot_model_input: String::new(),
-            copilot_endpoint_input: String::new(),
             copilot_fields_dirty: false,
+            local_name_input: String::new(),
+            local_url_input: String::new(),
+            local_key_input: String::new(),
+            local_form_initialized: false,
+            local_testing: false,
+            local_test_result: None,
+            local_discovered_models: Vec::new(),
             gemini_key_input: String::new(),
             openai_key_input: String::new(),
             anthropic_key_input: String::new(),
             persist_keys_to_disk: false,
+        }
+    }
+
+    pub fn on_local_llm_test_result(&mut self, ok: bool, message: String, models: Vec<String>) {
+        self.local_testing = false;
+        self.local_test_result = Some((ok, message));
+        if ok {
+            self.local_discovered_models = models;
         }
     }
 
@@ -75,7 +95,20 @@ impl SettingsWindow {
             && let Some(st) = copilot_status
         {
             self.copilot_model_input = st.model.clone();
-            self.copilot_endpoint_input = st.local_endpoint.clone();
+        }
+        if !self.local_form_initialized
+            && let Some(st) = copilot_status
+        {
+            self.local_form_initialized = true;
+            if self.local_url_input.is_empty() {
+                self.local_url_input = st.local_endpoint.clone();
+            }
+            if self.local_name_input.is_empty() {
+                self.local_name_input = st
+                    .active_local_name
+                    .clone()
+                    .unwrap_or_else(|| "Ollama Local".into());
+            }
         }
 
         ui.horizontal_wrapped(|ui| {
@@ -221,41 +254,227 @@ impl SettingsWindow {
                         });
                     }
                 });
+            });
 
-                if active_provider == CopilotProvider::Local {
+        ui.add_space(10.0);
+        section_title(ui, "LOCAL LLM MODELS (OLLAMA / VLLM / LLAMA.CPP / LM STUDIO)");
+        let persist = self.persist_keys_to_disk;
+        egui::Frame::NONE
+            .fill(p.well)
+            .stroke(Stroke::new(1.0, p.border))
+            .inner_margin(8.0)
+            .show(ui, |ui| {
+                ui.set_min_width(ui.available_width());
+
+                egui::Grid::new("local_llm_form_grid")
+                    .num_columns(2)
+                    .spacing([8.0, 6.0])
+                    .show(ui, |ui| {
+                        ui.label(RichText::new("Name:").strong().color(p.text));
+                        ui.add(
+                            egui::TextEdit::singleline(&mut self.local_name_input)
+                                .hint_text("e.g. Ollama Local, vLLM RTX 5090")
+                                .desired_width(280.0),
+                        );
+                        ui.end_row();
+
+                        ui.label(RichText::new("URL:").strong().color(p.text));
+                        ui.add(
+                            egui::TextEdit::singleline(&mut self.local_url_input)
+                                .hint_text("http://127.0.0.1:11434/v1")
+                                .desired_width(340.0),
+                        );
+                        ui.end_row();
+
+                        ui.label(RichText::new("API Key:").strong().color(p.text));
+                        ui.add(
+                            egui::TextEdit::singleline(&mut self.local_key_input)
+                                .password(true)
+                                .hint_text("Optional (leave blank if no auth required)")
+                                .desired_width(340.0),
+                        );
+                        ui.end_row();
+                    });
+
+                ui.add_space(6.0);
+                ui.horizontal_wrapped(|ui| {
+                    let test_label = if self.local_testing {
+                        "Testing..."
+                    } else {
+                        "Test Connection"
+                    };
+                    if be_button(ui, test_label).clicked()
+                        && !self.local_testing
+                        && !self.local_url_input.trim().is_empty()
+                    {
+                        self.local_testing = true;
+                        self.local_test_result = None;
+                        let key = if self.local_key_input.trim().is_empty() {
+                            None
+                        } else {
+                            Some(self.local_key_input.trim().to_string())
+                        };
+                        send_msg(ClientMsg::TestLocalLlm {
+                            url: self.local_url_input.trim().to_string(),
+                            api_key: key,
+                        });
+                    }
+                    if be_button(ui, "Save & Use").clicked()
+                        && !self.local_name_input.trim().is_empty()
+                        && !self.local_url_input.trim().is_empty()
+                    {
+                        let key = if self.local_key_input.trim().is_empty() {
+                            None
+                        } else {
+                            Some(self.local_key_input.trim().to_string())
+                        };
+                        send_msg(ClientMsg::UpsertLocalLlm {
+                            name: self.local_name_input.trim().to_string(),
+                            url: self.local_url_input.trim().to_string(),
+                            api_key: key,
+                            persist,
+                        });
+                        self.local_key_input.clear();
+                    }
+                });
+
+                if self.local_testing {
                     ui.add_space(4.0);
+                    ui.label(
+                        RichText::new("● Probing endpoint & fetching available models...")
+                            .monospace()
+                            .size(10.5)
+                            .color(p.accent),
+                    );
+                } else if let Some((ok, ref msg)) = self.local_test_result {
+                    ui.add_space(4.0);
+                    ui.label(
+                        RichText::new(format!("● {msg}"))
+                            .monospace()
+                            .size(10.5)
+                            .color(if ok { p.status_green } else { p.status_red }),
+                    );
+                }
+
+                if !self.local_discovered_models.is_empty() {
+                    ui.add_space(6.0);
+                    ui.label(
+                        RichText::new("Available Models (click to select):")
+                            .size(11.0)
+                            .color(p.text_muted),
+                    );
+                    ui.add_space(3.0);
+                    let current_model = status.map(|s| s.model.as_str()).unwrap_or("");
+                    let models_clone = self.local_discovered_models.clone();
                     ui.horizontal_wrapped(|ui| {
-                        ui.label(RichText::new("Local Endpoint:").color(p.text));
-                        if ui
-                            .add(
-                                egui::TextEdit::singleline(&mut self.copilot_endpoint_input)
-                                    .hint_text("http://127.0.0.1:11434/v1/chat/completions")
-                                    .desired_width(300.0),
-                            )
-                            .changed()
-                        {
-                            self.copilot_fields_dirty = true;
-                        }
-                        if be_button(ui, "Save URL").clicked() {
-                            self.copilot_fields_dirty = false;
-                            send_msg(ClientMsg::SetCopilotConfig {
-                                provider: None,
-                                model: None,
-                                trust_mode: None,
-                                target_node: None,
-                                local_endpoint: Some(self.copilot_endpoint_input.clone()),
-                            });
+                        for model_id in models_clone {
+                            let is_active =
+                                active_provider == CopilotProvider::Local && current_model == model_id;
+                            if be_toggle_button(ui, &model_id, is_active).clicked() {
+                                self.copilot_model_input = model_id.clone();
+                                self.copilot_fields_dirty = false;
+                                if !self.local_key_input.trim().is_empty() {
+                                    if !self.local_name_input.trim().is_empty()
+                                        && !self.local_url_input.trim().is_empty()
+                                    {
+                                        send_msg(ClientMsg::UpsertLocalLlm {
+                                            name: self.local_name_input.trim().to_string(),
+                                            url: self.local_url_input.trim().to_string(),
+                                            api_key: Some(self.local_key_input.trim().to_string()),
+                                            persist,
+                                        });
+                                    } else {
+                                        send_msg(ClientMsg::SetCopilotApiKey {
+                                            provider: CopilotProvider::Local,
+                                            api_key: self.local_key_input.trim().to_string(),
+                                            persist,
+                                        });
+                                    }
+                                }
+                                send_msg(ClientMsg::SetCopilotConfig {
+                                    provider: Some(CopilotProvider::Local),
+                                    model: Some(model_id),
+                                    trust_mode: None,
+                                    target_node: None,
+                                    local_endpoint: Some(self.local_url_input.trim().to_string()),
+                                });
+                            }
                         }
                     });
+                }
+
+                if let Some(st) = status
+                    && !st.local_endpoints.is_empty()
+                {
+                    ui.add_space(8.0);
+                    ui.separator();
+                    ui.label(
+                        RichText::new("Saved Local Endpoints:")
+                            .size(11.0)
+                            .strong()
+                            .color(p.text_muted),
+                    );
+                    ui.add_space(3.0);
+                    for ep in &st.local_endpoints {
+                        let is_active = active_provider == CopilotProvider::Local
+                            && st.active_local_name.as_deref() == Some(ep.name.as_str());
+                        ui.horizontal_wrapped(|ui| {
+                            ui.label(
+                                RichText::new(&ep.name)
+                                    .monospace()
+                                    .strong()
+                                    .color(if is_active { p.accent } else { p.text }),
+                            );
+                            ui.label(
+                                RichText::new(&ep.url)
+                                    .monospace()
+                                    .size(10.5)
+                                    .color(p.text_muted),
+                            );
+                            if ep.has_key {
+                                ui.label(
+                                    RichText::new("● Key set")
+                                        .monospace()
+                                        .size(10.0)
+                                        .color(p.status_green),
+                                );
+                            }
+                            if be_toggle_button(ui, if is_active { "Active" } else { "Use" }, is_active)
+                                .clicked()
+                            {
+                                self.local_name_input = ep.name.clone();
+                                self.local_url_input = ep.url.clone();
+                                self.local_key_input.clear();
+                                send_msg(ClientMsg::SelectLocalLlm {
+                                    name: ep.name.clone(),
+                                });
+                            }
+                            if be_button(ui, "Test").clicked() && !self.local_testing {
+                                self.local_name_input = ep.name.clone();
+                                self.local_url_input = ep.url.clone();
+                                self.local_testing = true;
+                                self.local_test_result = None;
+                                send_msg(ClientMsg::TestLocalLlm {
+                                    url: ep.url.clone(),
+                                    api_key: None,
+                                });
+                            }
+                            if be_button(ui, "Remove").clicked() {
+                                send_msg(ClientMsg::DeleteLocalLlm {
+                                    name: ep.name.clone(),
+                                });
+                            }
+                        });
+                    }
                 }
             });
 
         ui.add_space(10.0);
-        section_title(ui, "PROVIDER API KEYS");
+        section_title(ui, "CLOUD PROVIDER API KEYS");
         ui.horizontal_wrapped(|ui| {
             ui.checkbox(
                 &mut self.persist_keys_to_disk,
-                RichText::new("Persist keys to $KAAGE_APPDATA/kaage/copilot_keys.json (0600) — unchecked keeps keys in daemon RAM only")
+                RichText::new("Persist keys & local endpoints to $KAAGE_APPDATA/kaage/ (0600) — unchecked keeps them in daemon RAM only")
                     .size(11.0)
                     .color(p.text_muted),
             );

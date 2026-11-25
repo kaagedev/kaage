@@ -791,6 +791,69 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
                     });
                 }
             },
+            ClientMsg::UpsertLocalLlm {
+                name,
+                url,
+                api_key,
+                persist,
+            } => match state.copilot.upsert_local_llm(name.clone(), url, api_key, persist) {
+                Ok(st) => {
+                    let _ = out_tx.send(ServerMsg::ActionFeedback {
+                        target: name,
+                        ok: true,
+                        message: if persist {
+                            "Local LLM endpoint saved".into()
+                        } else {
+                            "Local LLM endpoint active in memory".into()
+                        },
+                    });
+                    let _ = out_tx.send(ServerMsg::CopilotStatus(st));
+                }
+                Err(err) => {
+                    let _ = out_tx.send(ServerMsg::ActionFeedback {
+                        target: name,
+                        ok: false,
+                        message: err,
+                    });
+                }
+            },
+            ClientMsg::DeleteLocalLlm { name } => match state.copilot.delete_local_llm(&name) {
+                Ok(st) => {
+                    let _ = out_tx.send(ServerMsg::ActionFeedback {
+                        target: name,
+                        ok: true,
+                        message: "Local LLM endpoint removed".into(),
+                    });
+                    let _ = out_tx.send(ServerMsg::CopilotStatus(st));
+                }
+                Err(err) => {
+                    let _ = out_tx.send(ServerMsg::ActionFeedback {
+                        target: name,
+                        ok: false,
+                        message: err,
+                    });
+                }
+            },
+            ClientMsg::SelectLocalLlm { name } => match state.copilot.select_local_llm(&name) {
+                Ok(st) => {
+                    let _ = out_tx.send(ServerMsg::CopilotStatus(st));
+                }
+                Err(err) => {
+                    let _ = out_tx.send(ServerMsg::ActionFeedback {
+                        target: name,
+                        ok: false,
+                        message: err,
+                    });
+                }
+            },
+            ClientMsg::TestLocalLlm { url, api_key } => {
+                let copilot = Arc::clone(&state.copilot);
+                let tx = out_tx.clone();
+                tokio::task::spawn_blocking(move || {
+                    let res = copilot.test_local_llm(url, api_key);
+                    let _ = tx.send(res);
+                });
+            }
             ClientMsg::AskCopilot { request_id, prompt } => {
                 state.copilot.spawn_ask(
                     request_id,

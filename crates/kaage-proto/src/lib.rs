@@ -572,6 +572,13 @@ impl TrustMode {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LocalLlmEndpoint {
+    pub name: String,
+    pub url: String,
+    pub has_key: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CopilotStatus {
     pub provider: CopilotProvider,
     pub model: String,
@@ -582,6 +589,8 @@ pub struct CopilotStatus {
     pub has_openai_key: bool,
     pub has_anthropic_key: bool,
     pub local_endpoint: String,
+    pub local_endpoints: Vec<LocalLlmEndpoint>,
+    pub active_local_name: Option<String>,
     pub flake_path: String,
 }
 
@@ -712,6 +721,22 @@ pub enum ClientMsg {
         api_key: String,
         persist: bool,
     },
+    UpsertLocalLlm {
+        name: String,
+        url: String,
+        api_key: Option<String>,
+        persist: bool,
+    },
+    DeleteLocalLlm {
+        name: String,
+    },
+    SelectLocalLlm {
+        name: String,
+    },
+    TestLocalLlm {
+        url: String,
+        api_key: Option<String>,
+    },
     AskCopilot {
         request_id: u64,
         prompt: String,
@@ -779,6 +804,12 @@ pub enum ServerMsg {
     CopilotConfirmRequest {
         request_id: u64,
         gate: CopilotCard,
+    },
+    LocalLlmTestResult {
+        ok: bool,
+        url: String,
+        message: String,
+        models: Vec<String>,
     },
 }
 
