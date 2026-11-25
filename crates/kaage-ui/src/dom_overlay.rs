@@ -103,6 +103,18 @@ impl CopilotWindow {
         self.dom_dirty = true;
     }
 
+    pub fn on_connection_test(&mut self, summary: String) {
+        let rid = self.next_request_id;
+        self.next_request_id += 1;
+        self.items.push(CopilotItem::Assistant {
+            request_id: rid,
+            text: summary,
+            done: true,
+            ts_ms: now_epoch_ms(),
+        });
+        self.dom_dirty = true;
+    }
+
     pub fn load_history(&mut self, history: &[CopilotHistoryMessage]) {
         if self.active_request_id.is_some() {
             return;
@@ -238,6 +250,14 @@ impl CopilotWindow {
                         ClientMsg::GetCopilotStatus,
                     )];
                 }
+                "test" => {
+                    self.items.push(CopilotItem::SystemNotice(
+                        "Testing active Copilot connection...".into(),
+                    ));
+                    return vec![CopilotCrossAction::SendClientMsg(
+                        ClientMsg::TestCopilotConnection,
+                    )];
+                }
                 "clear" => {
                     self.items.clear();
                     return vec![CopilotCrossAction::SendClientMsg(
@@ -320,6 +340,14 @@ impl CopilotWindow {
                     .size(10.5)
                     .color(if st.ready { p.status_green } else { p.status_amber }),
                 );
+                if be_button(ui, "Test Connection").clicked() {
+                    self.items.push(CopilotItem::SystemNotice(
+                        "Testing active Copilot connection...".into(),
+                    ));
+                    actions.push(CopilotCrossAction::SendClientMsg(
+                        ClientMsg::TestCopilotConnection,
+                    ));
+                }
                 if be_button(ui, "⚙ Keys / Backends").clicked() {
                     actions.push(CopilotCrossAction::OpenCopilotSettings);
                 }
@@ -609,6 +637,7 @@ mod wasm_overlay {
         TailLogs(String),
         OpenSettings,
         SetKey(String),
+        TestConnection,
     }
 
     static DOM_QUEUE: OnceLock<Mutex<Vec<RawDomEvent>>> = OnceLock::new();
@@ -634,6 +663,7 @@ mod wasm_overlay {
                     "logs" => RawDomEvent::TailLogs(arg),
                     "settings" => RawDomEvent::OpenSettings,
                     "setkey" => RawDomEvent::SetKey(arg),
+                    "test" => RawDomEvent::TestConnection,
                     _ => return,
                 };
                 queue().lock().unwrap_or_else(|e| e.into_inner()).push(ev);
@@ -753,7 +783,8 @@ mod wasm_overlay {
                      <span class='kc-pill' style='border-color:{dot};color:{dot}'>{} · {}</span>\
                      <span class='kc-pill'>{}</span>\
                      <span class='kc-pill'>@{}</span>\
-                     <button class='kc-btn' style='margin-left:auto' onclick=\"window.__kaageDispatch('settings','')\">⚙ Backends &amp; Keys</button>",
+                     <button class='kc-btn' style='margin-left:auto' onclick=\"window.__kaageDispatch('test','')\">Test Connection</button>\
+                     <button class='kc-btn' onclick=\"window.__kaageDispatch('settings','')\">⚙ Backends &amp; Keys</button>",
                     esc(st.provider.as_str()),
                     esc(&st.model),
                     esc(st.trust_mode.as_str()),
@@ -825,9 +856,12 @@ mod wasm_overlay {
                             )
                         };
                         let cursor = if *done { "" } else { "<span class='kc-cursor'>▌</span>" };
+                        let collapse_think = status
+                            .map(|s| s.optimizations.collapse_think_blocks)
+                            .unwrap_or(true);
                         html.push_str(&format!(
                             "<div class='kc-msg kc-assistant'><div class='kc-role'><span>COPILOT</span>{ts_html}</div><div class='kc-md'>{}{cursor}</div></div>",
-                            super::markdown_to_html(text)
+                            super::markdown_to_html_with_options(text, collapse_think)
                         ));
                     }
                     CopilotItem::ToolStatus {
@@ -908,6 +942,15 @@ mod wasm_overlay {
                             api_key,
                             persist: false,
                         },
+                    ));
+                }
+                RawDomEvent::TestConnection => {
+                    win.items.push(CopilotItem::SystemNotice(
+                        "Testing active Copilot connection...".into(),
+                    ));
+                    win.dom_dirty = true;
+                    out.push(CopilotCrossAction::SendClientMsg(
+                        ClientMsg::TestCopilotConnection,
                     ));
                 }
             }
@@ -1110,6 +1153,14 @@ fn escape_html_text(s: &str) -> String {
 /// and inline formatting.
 #[allow(dead_code)]
 pub fn markdown_to_html(md: &str) -> String {
+    markdown_to_html_with_options(md, true)
+}
+
+#[allow(dead_code)]
+pub fn markdown_to_html_with_options(md: &str, collapse_think: bool) -> String {
+    if !collapse_think {
+        return render_markdown_blocks(md);
+    }
     let mut out = String::with_capacity(md.len() + 64);
     let mut rest = md;
     while let Some(start) = rest.find("<think>") {

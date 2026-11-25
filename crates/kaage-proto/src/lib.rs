@@ -579,6 +579,28 @@ pub struct LocalLlmEndpoint {
     pub context_window: u64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CopilotOptimizations {
+    pub auto_detect_context: bool,
+    pub adaptive_tool_truncation: bool,
+    pub tool_output_max_chars: u32,
+    pub collapse_think_blocks: bool,
+    /// 0 = auto (context_window / 8, clamped 1K..=8K)
+    pub local_max_tokens: u64,
+}
+
+impl Default for CopilotOptimizations {
+    fn default() -> Self {
+        Self {
+            auto_detect_context: true,
+            adaptive_tool_truncation: true,
+            tool_output_max_chars: 12_000,
+            collapse_think_blocks: true,
+            local_max_tokens: 0,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CopilotHistoryMessage {
     pub role: String,
@@ -607,6 +629,7 @@ pub struct CopilotStatus {
     pub default_model: Option<String>,
     pub default_local_name: Option<String>,
     pub default_local_endpoint: Option<String>,
+    pub optimizations: CopilotOptimizations,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -800,6 +823,8 @@ pub enum ClientMsg {
         url: String,
         api_key: Option<String>,
     },
+    TestCopilotConnection,
+    SetCopilotOptimizations(CopilotOptimizations),
     AskCopilot {
         request_id: u64,
         prompt: String,
@@ -883,6 +908,10 @@ pub enum ServerMsg {
         message: String,
         models: Vec<String>,
         context_window: Option<u64>,
+    },
+    CopilotConnectionTest {
+        ok: bool,
+        summary: String,
     },
     CopilotHistory(Vec<CopilotHistoryMessage>),
     DebugLogsSnapshot(Vec<DebugLogEntry>),

@@ -3,7 +3,9 @@ use crate::theme::{
     preset_palette, user_settings,
 };
 use egui::{Color32, CornerRadius, RichText, ScrollArea, Stroke, Ui};
-use kaage_proto::{AppDataSnapshot, ClientMsg, CopilotProvider, CopilotStatus, TrustMode};
+use kaage_proto::{
+    AppDataSnapshot, ClientMsg, CopilotOptimizations, CopilotProvider, CopilotStatus, TrustMode,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum SettingsTab {
@@ -710,6 +712,92 @@ impl SettingsWindow {
                     send_msg,
                 );
             });
+
+        ui.add_space(10.0);
+        section_title(ui, "COPILOT OPTIMIZATIONS");
+        let mut opts = status.map(|s| s.optimizations).unwrap_or_default();
+        let mut opts_changed = false;
+        egui::Frame::NONE
+            .fill(p.well)
+            .stroke(Stroke::new(1.0, p.border))
+            .inner_margin(8.0)
+            .show(ui, |ui| {
+                ui.set_min_width(ui.available_width());
+
+                if ui
+                    .checkbox(
+                        &mut opts.auto_detect_context,
+                        RichText::new("Auto-detect local context window on Test Connection")
+                            .color(p.text),
+                    )
+                    .changed()
+                {
+                    opts_changed = true;
+                }
+                if ui
+                    .checkbox(
+                        &mut opts.collapse_think_blocks,
+                        RichText::new("Render <think>...</think> reasoning as collapsible sections")
+                            .color(p.text),
+                    )
+                    .changed()
+                {
+                    opts_changed = true;
+                }
+                if ui
+                    .checkbox(
+                        &mut opts.adaptive_tool_truncation,
+                        RichText::new(
+                            "Adaptive tool output truncation (halve max tool output for <= 32K local models)",
+                        )
+                        .color(p.text),
+                    )
+                    .changed()
+                {
+                    opts_changed = true;
+                }
+
+                ui.add_space(4.0);
+                ui.horizontal_wrapped(|ui| {
+                    ui.label(RichText::new("Max Tool Output:").color(p.text));
+                    for (label, val) in [
+                        ("4K chars", 4_000u32),
+                        ("6K chars", 6_000),
+                        ("12K chars", 12_000),
+                        ("24K chars", 24_000),
+                    ] {
+                        if be_toggle_button(ui, label, opts.tool_output_max_chars == val).clicked() {
+                            opts.tool_output_max_chars = val;
+                            opts_changed = true;
+                        }
+                    }
+                });
+
+                ui.add_space(4.0);
+                ui.horizontal_wrapped(|ui| {
+                    ui.label(RichText::new("Local Max Output Tokens:").color(p.text));
+                    for (label, val) in [
+                        ("Auto (ctx/8)", 0u64),
+                        ("2K", 2_048),
+                        ("4K", 4_096),
+                        ("8K", 8_192),
+                    ] {
+                        if be_toggle_button(ui, label, opts.local_max_tokens == val).clicked() {
+                            opts.local_max_tokens = val;
+                            opts_changed = true;
+                        }
+                    }
+                });
+
+                ui.add_space(4.0);
+                if be_button(ui, "Reset Defaults").clicked() {
+                    opts = CopilotOptimizations::default();
+                    opts_changed = true;
+                }
+            });
+        if opts_changed {
+            send_msg(ClientMsg::SetCopilotOptimizations(opts));
+        }
     }
 
     fn render_appdata_tab(

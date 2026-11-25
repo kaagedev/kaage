@@ -926,6 +926,28 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
                     let _ = tx.send(res);
                 });
             }
+            ClientMsg::TestCopilotConnection => {
+                let copilot = Arc::clone(&state.copilot);
+                let tx = out_tx.clone();
+                tokio::task::spawn_blocking(move || {
+                    let (ok, summary) = copilot.test_active_connection();
+                    let _ = tx.send(ServerMsg::CopilotConnectionTest { ok, summary });
+                });
+            }
+            ClientMsg::SetCopilotOptimizations(opts) => {
+                match state.copilot.set_optimizations(opts) {
+                    Ok(st) => {
+                        let _ = out_tx.send(ServerMsg::CopilotStatus(st));
+                    }
+                    Err(err) => {
+                        let _ = out_tx.send(ServerMsg::ActionFeedback {
+                            target: "Copilot Optimizations".into(),
+                            ok: false,
+                            message: err,
+                        });
+                    }
+                }
+            }
             ClientMsg::AskCopilot { request_id, prompt } => {
                 state.copilot.spawn_ask(
                     request_id,

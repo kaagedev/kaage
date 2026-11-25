@@ -1,6 +1,6 @@
 use kaage_proto::{
-    CopilotCard, CopilotHistoryMessage, CopilotProvider, CopilotStatus, LocalLlmEndpoint,
-    NixosInfo, ServerMsg, TrustMode, VitalsQuery, VitalsWindow,
+    CopilotCard, CopilotHistoryMessage, CopilotOptimizations, CopilotProvider, CopilotStatus,
+    LocalLlmEndpoint, NixosInfo, ServerMsg, TrustMode, VitalsQuery, VitalsWindow,
 };
 use pi_durable::ai::event_stream::AssistantMessageEventStream;
 use pi_durable::ai::http::{Request as PiHttpRequest, send as pi_http_send};
@@ -57,6 +57,7 @@ pub struct CopilotConfig {
     pub local_endpoint: String,
     pub local_context_window: u64,
     pub active_local_name: Option<String>,
+    pub optimizations: CopilotOptimizations,
 }
 
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
@@ -105,6 +106,8 @@ struct PersistedCopilotConfig {
     last_local_name: Option<String>,
     #[serde(default)]
     trust_mode: Option<TrustMode>,
+    #[serde(default)]
+    optimizations: CopilotOptimizations,
 }
 
 pub struct MemoryStore {
@@ -294,6 +297,7 @@ impl CopilotCore {
             default_model: def.as_ref().map(|d| d.model.clone()),
             default_local_name: def.as_ref().and_then(|d| d.local_name.clone()),
             default_local_endpoint: def.as_ref().and_then(|d| d.local_endpoint.clone()),
+            optimizations: cfg.optimizations,
         }
     }
 
@@ -311,6 +315,7 @@ impl CopilotCore {
             last_local_endpoint: Some(cfg.local_endpoint.clone()),
             last_local_name: cfg.active_local_name.clone(),
             trust_mode: Some(cfg.trust_mode),
+            optimizations: cfg.optimizations,
         };
         drop(cfg);
         if let Some(parent) = self.config_file.parent() {
@@ -382,10 +387,14 @@ impl CopilotCore {
         let is_remote = !target_node.is_empty() && target_node != self.local_hostname;
         let max_chars = {
             let cfg = self.config.read().unwrap_or_else(|e| e.into_inner());
-            if cfg.provider == CopilotProvider::Local && cfg.local_context_window <= 32_768 {
-                6_000
+            let base = (cfg.optimizations.tool_output_max_chars as usize).clamp(1_000, 64_000);
+            if cfg.optimizations.adaptive_tool_truncation
+                && cfg.provider == CopilotProvider::Local
+                && cfg.local_context_window <= 32_768
+            {
+                (base / 2).max(2_000)
             } else {
-                12_000
+                base
             }
         };
 
@@ -816,14 +825,19 @@ impl Models for KaageModels {
                 Some(m)
             }
             "kaage-local" => {
-                let (ep, ctx_window) = {
+                let (ep, ctx_window, override_max) = {
                     let cfg = self.core.config.read().unwrap_or_else(|e| e.into_inner());
                     (
                         cfg.local_endpoint.clone(),
                         cfg.local_context_window.clamp(4_096, 1_000_000),
+                        cfg.optimizations.local_max_tokens,
                     )
                 };
-                let max_tokens = (ctx_window / 8).clamp(1_024, 8_192);
+                let max_tokens = if override_max > 0 {
+                    override_max.clamp(512, ctx_window / 2)
+                } else {
+                    (ctx_window / 8).clamp(1_024, 8_192)
+                };
                 let mut m = Model::new(
                     provider,
                     id,
@@ -1106,6 +1120,7 @@ impl CopilotManager {
                 local_endpoint,
                 local_context_window,
                 active_local_name,
+                optimizations: saved_config.optimizations,
             }),
             default_backend: RwLock::new(saved_config.default_backend),
             runtime_keys: RwLock::new(saved_keys),
@@ -1276,6 +1291,19 @@ impl CopilotManager {
 
     pub fn status(&self) -> CopilotStatus {
         self.core.status()
+    }
+
+    pub fn set_optimizations(&self, mut opts: CopilotOptimizations) -> Result<CopilotStatus, String> {
+        opts.tool_output_max_chars = opts.tool_output_max_chars.clamp(1_000, 64_000);
+        if opts.local_max_tokens > 0 {
+            opts.local_max_tokens = opts.local_max_tokens.clamp(512, 32_768);
+        }
+        {
+            let mut cfg = self.core.config.write().unwrap_or_else(|e| e.into_inner());
+            cfg.optimizations = opts;
+        }
+        self.core.persist_config()?;
+        Ok(self.status())
     }
 
     /// Read the persisted durable chat history from `pi-durable`'s SQLite ledger.
@@ -1664,7 +1692,15 @@ impl CopilotManager {
                 Ok(resp) if resp.ok() => {
                     let body = resp.text().unwrap_or_default();
                     let res_bytes = body.len();
-                    let (models, detected_ctx) = parse_models_response_with_ctx(&body);
+                    let (models, raw_ctx) = parse_models_response_with_ctx(&body);
+                    let auto_detect = self
+                        .core
+                        .config
+                        .read()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .optimizations
+                        .auto_detect_context;
+                    let detected_ctx = if auto_detect { raw_ctx } else { None };
                     tracing::info!(
                         "copilot probe <- {probe_url} (req_bytes=0, res_bytes={res_bytes}, models={}, ctx={:?})",
                         models.len(),
@@ -1711,6 +1747,207 @@ impl CopilotManager {
             message: last_err,
             models: Vec::new(),
             context_window: None,
+        }
+    }
+
+    /// Test the currently active Copilot provider/model connection and return a formatted
+    /// Markdown summary with model metadata, endpoint, latency, and capabilities.
+    pub fn test_active_connection(&self) -> (bool, String) {
+        let started = std::time::Instant::now();
+        let status = self.status();
+        let (local_ctx, opts) = {
+            let cfg = self.core.config.read().unwrap_or_else(|e| e.into_inner());
+            (cfg.local_context_window, cfg.optimizations)
+        };
+        let api_key = self.core.effective_api_key(status.provider);
+
+        if status.provider != CopilotProvider::Local && api_key.is_none() {
+            let env_name = status.provider.env_var_name();
+            return (
+                false,
+                format!(
+                    "### Connection Test — Failed\n\
+                     - **Provider:** {}\n\
+                     - **Model:** `{}`\n\
+                     - **Error:** Missing `{env_name}`. Configure it in `⚙ Backends & Keys`.",
+                    status.provider.label(),
+                    status.model,
+                ),
+            );
+        }
+
+        if status.provider == CopilotProvider::Local {
+            let res = self.test_local_llm(status.local_endpoint.clone(), api_key);
+            let elapsed_ms = started.elapsed().as_millis();
+            return match res {
+                ServerMsg::LocalLlmTestResult {
+                    ok,
+                    url,
+                    message,
+                    models,
+                    context_window,
+                } => {
+                    let max_tok = if opts.local_max_tokens > 0 {
+                        opts.local_max_tokens
+                    } else {
+                        (local_ctx / 8).clamp(1_024, 8_192)
+                    };
+                    let model_found = models.iter().any(|m| m == &status.model);
+                    let models_preview = if models.is_empty() {
+                        "_none reported_".to_string()
+                    } else {
+                        models
+                            .iter()
+                            .take(10)
+                            .map(|m| format!("`{m}`"))
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    };
+                    let detected_str = context_window
+                        .map(|c| format!("{}K (detected)", c / 1024))
+                        .unwrap_or_else(|| "not reported".into());
+                    let summary = format!(
+                        "### Connection Test — {}\n\
+                         - **Provider:** {} {}\n\
+                         - **Endpoint:** `{}`\n\
+                         - **Active Model:** `{}`{}\n\
+                         - **Context Window:** {}K configured · {} · max output {} tokens\n\
+                         - **Latency:** {} ms\n\
+                         - **Status:** {}\n\
+                         - **Available Models ({}):** {}",
+                        if ok { "OK" } else { "Failed" },
+                        status.provider.label(),
+                        status
+                            .active_local_name
+                            .as_deref()
+                            .map(|n| format!("(`{n}`)"))
+                            .unwrap_or_default(),
+                        normalize_openai_base_url(&url),
+                        status.model,
+                        if ok && !models.is_empty() && !model_found {
+                            " *(warning: not in server's model list)*"
+                        } else {
+                            ""
+                        },
+                        local_ctx / 1024,
+                        detected_str,
+                        max_tok,
+                        elapsed_ms,
+                        message,
+                        models.len(),
+                        models_preview,
+                    );
+                    (ok, summary)
+                }
+                _ => (false, "Unexpected test result".into()),
+            };
+        }
+
+        let key = api_key.unwrap_or_default();
+        let (probe_url, is_anthropic) = match status.provider {
+            CopilotProvider::Gemini => (
+                format!("{GEMINI_BASE_URL}/models/{}", status.model),
+                false,
+            ),
+            CopilotProvider::OpenAi => (
+                format!("{OPENAI_BASE_URL}/models/{}", status.model),
+                false,
+            ),
+            CopilotProvider::Claude => (
+                format!("{ANTHROPIC_BASE_URL}/v1/models/{}", status.model),
+                true,
+            ),
+            CopilotProvider::Local => unreachable!(),
+        };
+
+        let cancel = CancelToken::new();
+        let mut req = PiHttpRequest::new("GET", probe_url.clone())
+            .timeout(Some(std::time::Duration::from_secs(10)));
+        if is_anthropic {
+            req = req
+                .header("x-api-key", key)
+                .header("anthropic-version", "2023-06-01");
+        } else {
+            req = req.header("Authorization", format!("Bearer {key}"));
+        }
+
+        match pi_http_send(&req, Some(&cancel)) {
+            Ok(resp) if resp.ok() => {
+                let body = resp.text().unwrap_or_default();
+                let elapsed_ms = started.elapsed().as_millis();
+                tracing::info!(
+                    "copilot test <- {probe_url} (req_bytes=0, res_bytes={}, elapsed_ms={elapsed_ms})",
+                    body.len()
+                );
+                let meta: Value = serde_json::from_str(&body).unwrap_or(Value::Null);
+                let mut extra = Vec::new();
+                if let Some(dn) = meta.get("display_name").and_then(Value::as_str) {
+                    extra.push(format!("- **Display Name:** {dn}"));
+                }
+                if let Some(owner) = meta.get("owned_by").and_then(Value::as_str) {
+                    extra.push(format!("- **Owned By:** `{owner}`"));
+                }
+                if let Some(created) = meta.get("created_at").and_then(Value::as_str) {
+                    extra.push(format!("- **Created:** `{created}`"));
+                }
+                let extra_block = if extra.is_empty() {
+                    String::new()
+                } else {
+                    format!("\n{}", extra.join("\n"))
+                };
+                (
+                    true,
+                    format!(
+                        "### Connection Test — OK\n\
+                         - **Provider:** {}\n\
+                         - **Model:** `{}`\n\
+                         - **Endpoint:** `{probe_url}`\n\
+                         - **Latency:** {elapsed_ms} ms\n\
+                         - **Trust Mode:** `{}`{extra_block}",
+                        status.provider.label(),
+                        status.model,
+                        status.trust_mode.as_str(),
+                    ),
+                )
+            }
+            Ok(resp) => {
+                let code = resp.status;
+                let snippet: String = resp.text().unwrap_or_default().chars().take(240).collect();
+                let elapsed_ms = started.elapsed().as_millis();
+                tracing::warn!(
+                    "copilot test <- {probe_url} (status={code}, elapsed_ms={elapsed_ms})"
+                );
+                (
+                    false,
+                    format!(
+                        "### Connection Test — Failed (HTTP {code})\n\
+                         - **Provider:** {}\n\
+                         - **Model:** `{}`\n\
+                         - **Endpoint:** `{probe_url}`\n\
+                         - **Latency:** {elapsed_ms} ms\n\
+                         - **Response:** `{}`",
+                        status.provider.label(),
+                        status.model,
+                        snippet.trim(),
+                    ),
+                )
+            }
+            Err(err) => {
+                let elapsed_ms = started.elapsed().as_millis();
+                tracing::warn!("copilot test <- {probe_url} (error={err}, elapsed_ms={elapsed_ms})");
+                (
+                    false,
+                    format!(
+                        "### Connection Test — Failed\n\
+                         - **Provider:** {}\n\
+                         - **Model:** `{}`\n\
+                         - **Endpoint:** `{probe_url}`\n\
+                         - **Error:** `{err}`",
+                        status.provider.label(),
+                        status.model,
+                    ),
+                )
+            }
         }
     }
 

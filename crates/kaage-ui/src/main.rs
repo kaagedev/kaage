@@ -922,6 +922,25 @@ impl eframe::App for KaageApp {
                                     undo_msg: None,
                                 });
                             }
+                            ServerMsg::CopilotConnectionTest { ok, summary } => {
+                                for g in &mut self.wm.groups {
+                                    for t in &mut g.tabs {
+                                        if let PaneKind::Copilot(c) = &mut t.kind {
+                                            c.on_connection_test(summary.clone());
+                                        }
+                                    }
+                                }
+                                self.toast = Some(ToastNotice {
+                                    ok,
+                                    text: if ok {
+                                        "Kaage Copilot: Connection OK".into()
+                                    } else {
+                                        "Kaage Copilot: Connection test failed".into()
+                                    },
+                                    expires_at: now + 4.5,
+                                    undo_msg: None,
+                                });
+                            }
                             ServerMsg::CopilotHistory(hist) => {
                                 self.copilot_history = hist;
                                 for g in &mut self.wm.groups {
