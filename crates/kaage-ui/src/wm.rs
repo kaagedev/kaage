@@ -440,8 +440,12 @@ impl BeWindowManager {
             chosen
         } else {
             if !is_float_mode && !tiled_indices.is_empty() {
-                let rects = compute_layout_rects(active_layout, stage_rect, tiled_indices.len());
-                for (slot, &g_idx) in tiled_indices.iter().enumerate() {
+                // Keep tile slot positions stable by group ID so focusing/raising a window
+                // in z-order never swaps its physical slot in BSP/Cols/Rows/Grid layouts.
+                let mut slot_indices = tiled_indices.clone();
+                slot_indices.sort_by_key(|&idx| self.groups[idx].id);
+                let rects = compute_layout_rects(active_layout, stage_rect, slot_indices.len());
+                for (slot, &g_idx) in slot_indices.iter().enumerate() {
                     if let Some(r) = rects.get(slot) {
                         self.groups[g_idx].pos = r.min;
                         self.groups[g_idx].size =
