@@ -833,6 +833,7 @@ pub enum ClientMsg {
         api_key: Option<String>,
     },
     TestCopilotConnection,
+    ListCopilotModels,
     SetCopilotOptimizations(CopilotOptimizations),
     AskCopilot {
         request_id: u64,
@@ -937,6 +938,7 @@ pub enum ServerMsg {
         ok: bool,
         summary: String,
     },
+    CopilotModels(Vec<String>),
     CopilotHistory(Vec<CopilotHistoryMessage>),
     MemoriesSnapshot(Vec<HostMemoryItem>),
     DebugLogsSnapshot(Vec<DebugLogEntry>),

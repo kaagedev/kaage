@@ -128,6 +128,7 @@ struct KaageApp {
     appdata: Option<AppDataSnapshot>,
     copilot_status: Option<CopilotStatus>,
     copilot_history: Vec<CopilotHistoryMessage>,
+    copilot_models: Vec<String>,
     memories: Vec<HostMemoryItem>,
     debug_logs: VecDeque<DebugLogEntry>,
     cpu_history: Vec<f32>,
@@ -291,6 +292,7 @@ impl KaageApp {
             appdata: None,
             copilot_status: None,
             copilot_history: Vec::new(),
+            copilot_models: Vec::new(),
             memories: Vec::new(),
             debug_logs: VecDeque::with_capacity(2000),
             cpu_history: Vec::with_capacity(MAX_HISTORY_SAMPLES),
@@ -342,6 +344,7 @@ impl KaageApp {
         self.send_client_msg(ClientMsg::GetAppDataState);
         self.send_client_msg(ClientMsg::GetCopilotStatus);
         self.send_client_msg(ClientMsg::GetCopilotHistory);
+        self.send_client_msg(ClientMsg::ListCopilotModels);
         self.send_client_msg(ClientMsg::ListMemories { query: None });
         self.send_client_msg(ClientMsg::GetDebugLogs);
         let startup = std::mem::take(&mut self.pending_startup_msgs);
@@ -604,6 +607,7 @@ impl KaageApp {
     fn open_copilot(&mut self) {
         self.send_client_msg(ClientMsg::GetCopilotStatus);
         self.send_client_msg(ClientMsg::GetCopilotHistory);
+        self.send_client_msg(ClientMsg::ListCopilotModels);
         if self
             .wm
             .focus_matching_tab(|k| matches!(k, PaneKind::Copilot(_)))
@@ -613,6 +617,9 @@ impl KaageApp {
         let mut win = CopilotWindow::new();
         if !self.copilot_history.is_empty() {
             win.load_history(&self.copilot_history);
+        }
+        if !self.copilot_models.is_empty() {
+            win.set_available_models(self.copilot_models.clone());
         }
         self.wm.open_window(
             "Copilot (AI)".into(),
@@ -847,7 +854,14 @@ impl eframe::App for KaageApp {
                             ServerMsg::SearchResults { .. } => {}
                             ServerMsg::AppDataState(snap) => self.appdata = Some(snap),
                             ServerMsg::CopilotStatus(st) => {
+                                let backend_changed = self.copilot_status.as_ref().is_none_or(|prev| {
+                                    prev.provider != st.provider
+                                        || prev.local_endpoint != st.local_endpoint
+                                });
                                 self.copilot_status = Some(st);
+                                if backend_changed {
+                                    self.send_client_msg(ClientMsg::ListCopilotModels);
+                                }
                                 for g in &mut self.wm.groups {
                                     for t in &mut g.tabs {
                                         if let PaneKind::Copilot(c) = &mut t.kind {
@@ -944,6 +958,16 @@ impl eframe::App for KaageApp {
                                     expires_at: now + 4.5,
                                     undo_msg: None,
                                 });
+                            }
+                            ServerMsg::CopilotModels(models) => {
+                                self.copilot_models = models;
+                                for g in &mut self.wm.groups {
+                                    for t in &mut g.tabs {
+                                        if let PaneKind::Copilot(c) = &mut t.kind {
+                                            c.set_available_models(self.copilot_models.clone());
+                                        }
+                                    }
+                                }
                             }
                             ServerMsg::CopilotHistory(hist) => {
                                 self.copilot_history = hist;

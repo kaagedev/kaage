@@ -2176,6 +2176,108 @@ impl CopilotManager {
         }
     }
 
+    /// List available model IDs on the currently active Copilot LLM connection
+    /// (for `/model` autocomplete).
+    pub fn list_active_models(&self) -> Vec<String> {
+        let status = self.status();
+        let api_key = self.core.effective_api_key(status.provider);
+        let mut models: Vec<String> = match status.provider {
+            CopilotProvider::Local => {
+                match self.test_local_llm(status.local_endpoint.clone(), api_key) {
+                    ServerMsg::LocalLlmTestResult { models, .. } => models,
+                    _ => Vec::new(),
+                }
+            }
+            CopilotProvider::Gemini => {
+                let mut found = Vec::new();
+                if let Some(key) = api_key {
+                    let req = PiHttpRequest::new("GET", format!("{GEMINI_BASE_URL}/models"))
+                        .header("Authorization", format!("Bearer {key}"))
+                        .timeout(Some(std::time::Duration::from_secs(8)));
+                    if let Ok(resp) = pi_http_send(&req, Some(&CancelToken::new()))
+                        && resp.ok()
+                    {
+                        let body = resp.text().unwrap_or_default();
+                        found = parse_models_response_with_ctx(&body)
+                            .0
+                            .into_iter()
+                            .map(|m| m.strip_prefix("models/").unwrap_or(&m).to_string())
+                            .collect();
+                    }
+                }
+                if found.is_empty() {
+                    found = vec![
+                        "gemini-2.5-flash".into(),
+                        "gemini-2.5-pro".into(),
+                        "gemini-2.0-flash".into(),
+                    ];
+                }
+                found
+            }
+            CopilotProvider::OpenAi => {
+                let mut found = Vec::new();
+                if let Some(key) = api_key {
+                    let req = PiHttpRequest::new("GET", format!("{OPENAI_BASE_URL}/models"))
+                        .header("Authorization", format!("Bearer {key}"))
+                        .timeout(Some(std::time::Duration::from_secs(8)));
+                    if let Ok(resp) = pi_http_send(&req, Some(&CancelToken::new()))
+                        && resp.ok()
+                    {
+                        let body = resp.text().unwrap_or_default();
+                        found = parse_models_response_with_ctx(&body)
+                            .0
+                            .into_iter()
+                            .filter(|m| {
+                                m.starts_with("gpt-")
+                                    || m.starts_with("o1")
+                                    || m.starts_with("o3")
+                                    || m.starts_with("o4")
+                                    || m.starts_with("chatgpt-")
+                            })
+                            .collect();
+                    }
+                }
+                if found.is_empty() {
+                    found = vec![
+                        "gpt-4o".into(),
+                        "gpt-4o-mini".into(),
+                        "gpt-4.1".into(),
+                        "o3-mini".into(),
+                    ];
+                }
+                found
+            }
+            CopilotProvider::Claude => {
+                let mut found = Vec::new();
+                if let Some(key) = api_key {
+                    let req = PiHttpRequest::new("GET", format!("{ANTHROPIC_BASE_URL}/v1/models"))
+                        .header("x-api-key", key)
+                        .header("anthropic-version", "2023-06-01")
+                        .timeout(Some(std::time::Duration::from_secs(8)));
+                    if let Ok(resp) = pi_http_send(&req, Some(&CancelToken::new()))
+                        && resp.ok()
+                    {
+                        let body = resp.text().unwrap_or_default();
+                        found = parse_models_response_with_ctx(&body).0;
+                    }
+                }
+                if found.is_empty() {
+                    found = vec![
+                        "claude-sonnet-4-20250514".into(),
+                        "claude-3-7-sonnet-20250219".into(),
+                        "claude-3-5-haiku-20241022".into(),
+                    ];
+                }
+                found
+            }
+        };
+
+        if !status.model.trim().is_empty() && !models.iter().any(|m| m == &status.model) {
+            models.insert(0, status.model);
+        }
+        models
+    }
+
     pub fn update_config(
         &self,
         provider: Option<CopilotProvider>,

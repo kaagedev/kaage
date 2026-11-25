@@ -43,6 +43,7 @@ pub struct CopilotWindow {
     pub items: Vec<CopilotItem>,
     #[cfg(not(target_arch = "wasm32"))]
     pub input: String,
+    pub available_models: Vec<String>,
     pub active_request_id: Option<u64>,
     pub next_request_id: u64,
     pub dom_dirty: bool,
@@ -53,16 +54,23 @@ impl CopilotWindow {
     pub fn new() -> Self {
         Self {
             items: vec![CopilotItem::SystemNotice(
-                "Kaage Copilot ready. Try asking \"Why is memory high?\" or use /remember, /pin, /memories, /test, /provider, /model, /mode, /node, /status."
+                "Kaage Copilot ready. Try asking \"Why is memory high?\" or type `/` for slash command autocomplete (/model, /provider, /remember, /pin, /memories, /test)."
                     .into(),
             )],
             #[cfg(not(target_arch = "wasm32"))]
             input: String::new(),
+            available_models: Vec::new(),
             active_request_id: None,
             next_request_id: 1,
             dom_dirty: true,
             awaiting_memories_dump: false,
         }
+    }
+
+    pub fn set_available_models(&mut self, models: Vec<String>) {
+        self.available_models = models;
+        #[cfg(target_arch = "wasm32")]
+        wasm_overlay::set_available_models(&self.available_models);
     }
 
     pub fn on_chunk(&mut self, request_id: u64, delta: String, done: bool) {
@@ -215,8 +223,24 @@ impl CopilotWindow {
                             },
                         )];
                     }
-                    self.items
-                        .push(CopilotItem::SystemNotice("Usage: /model <model-id>".into()));
+                    if self.available_models.is_empty() {
+                        self.items.push(CopilotItem::SystemNotice(
+                            "Usage: /model <model-id> (fetching available models...)".into(),
+                        ));
+                        return vec![CopilotCrossAction::SendClientMsg(
+                            ClientMsg::ListCopilotModels,
+                        )];
+                    }
+                    let list = self
+                        .available_models
+                        .iter()
+                        .map(|m| format!("- `/model {m}`"))
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    self.on_connection_test(format!(
+                        "### Available Models ({})\n{list}",
+                        self.available_models.len()
+                    ));
                     return Vec::new();
                 }
                 "mode" => {
@@ -703,13 +727,130 @@ mod wasm_overlay {
         OpenSettings,
         SetKey(String),
         TestConnection,
+        FetchModels,
+        AcPick(usize),
     }
 
     static DOM_QUEUE: OnceLock<Mutex<Vec<RawDomEvent>>> = OnceLock::new();
     static BRIDGE_INSTALLED: OnceLock<()> = OnceLock::new();
+    static AC_MODELS: OnceLock<Mutex<Vec<String>>> = OnceLock::new();
+    static AC_INDEX: OnceLock<Mutex<usize>> = OnceLock::new();
 
     fn queue() -> &'static Mutex<Vec<RawDomEvent>> {
         DOM_QUEUE.get_or_init(|| Mutex::new(Vec::new()))
+    }
+
+    fn ac_models() -> &'static Mutex<Vec<String>> {
+        AC_MODELS.get_or_init(|| Mutex::new(Vec::new()))
+    }
+
+    fn ac_index() -> &'static Mutex<usize> {
+        AC_INDEX.get_or_init(|| Mutex::new(0))
+    }
+
+    pub fn set_available_models(models: &[String]) {
+        *ac_models().lock().unwrap_or_else(|e| e.into_inner()) = models.to_vec();
+        refresh_autocomplete(false);
+    }
+
+    fn current_input_value() -> String {
+        web_sys::window()
+            .and_then(|w| w.document())
+            .and_then(|d| d.get_element_by_id("kc_input"))
+            .and_then(|el| js_sys::Reflect::get(&el, &"value".into()).ok())
+            .and_then(|v| v.as_string())
+            .unwrap_or_default()
+    }
+
+    fn set_input_value(val: &str) {
+        if let Some(el) = web_sys::window()
+            .and_then(|w| w.document())
+            .and_then(|d| d.get_element_by_id("kc_input"))
+        {
+            let _ = js_sys::Reflect::set(&el, &"value".into(), &val.into());
+            if let Ok(html) = el.dyn_into::<web_sys::HtmlElement>() {
+                let _ = html.focus();
+            }
+        }
+    }
+
+    fn hide_autocomplete() {
+        if let Some(ac) = web_sys::window()
+            .and_then(|w| w.document())
+            .and_then(|d| d.get_element_by_id("kc_ac"))
+        {
+            let _ = ac.set_attribute("style", "display:none;");
+            ac.set_inner_html("");
+        }
+    }
+
+    fn refresh_autocomplete(reset_idx: bool) {
+        let Some(doc) = web_sys::window().and_then(|w| w.document()) else {
+            return;
+        };
+        let Some(ac) = doc.get_element_by_id("kc_ac") else {
+            return;
+        };
+        let input = current_input_value();
+        let models = ac_models().lock().unwrap_or_else(|e| e.into_inner()).clone();
+        if input.to_ascii_lowercase().starts_with("/model ") && models.is_empty() {
+            queue()
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push(RawDomEvent::FetchModels);
+        }
+        let items = super::compute_slash_completions(&input, &models);
+        if items.is_empty() {
+            hide_autocomplete();
+            return;
+        }
+        let mut idx_guard = ac_index().lock().unwrap_or_else(|e| e.into_inner());
+        if reset_idx || *idx_guard >= items.len() {
+            *idx_guard = 0;
+        }
+        let sel = *idx_guard;
+        drop(idx_guard);
+
+        let mut html = String::new();
+        for (i, item) in items.iter().enumerate() {
+            let cls = if i == sel {
+                "kc-ac-item kc-ac-sel"
+            } else {
+                "kc-ac-item"
+            };
+            html.push_str(&format!(
+                "<div class='{cls}' onmousedown=\"event.preventDefault();window.__kaageDispatch('ac_pick','{i}')\">\
+                 <span>{}</span><span class='kc-ac-hint'>{}</span></div>",
+                esc(&item.label),
+                esc(&item.hint)
+            ));
+        }
+        ac.set_inner_html(&html);
+        let _ = ac.set_attribute("style", "display:block;");
+    }
+
+    fn apply_autocomplete_selection(idx: usize, submit_if_complete: bool) -> bool {
+        let input = current_input_value();
+        let models = ac_models().lock().unwrap_or_else(|e| e.into_inner()).clone();
+        let items = super::compute_slash_completions(&input, &models);
+        let Some(chosen) = items.get(idx) else {
+            return false;
+        };
+        if chosen.insert.is_empty() {
+            return false;
+        }
+        if submit_if_complete && chosen.auto_submit {
+            set_input_value("");
+            hide_autocomplete();
+            queue()
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push(RawDomEvent::Submit(chosen.insert.clone()));
+        } else {
+            set_input_value(&chosen.insert);
+            refresh_autocomplete(true);
+        }
+        true
     }
 
     fn ensure_bridge_installed() {
@@ -729,6 +870,7 @@ mod wasm_overlay {
                     "settings" => RawDomEvent::OpenSettings,
                     "setkey" => RawDomEvent::SetKey(arg),
                     "test" => RawDomEvent::TestConnection,
+                    "ac_pick" => RawDomEvent::AcPick(arg.parse::<usize>().unwrap_or(0)),
                     _ => return,
                 };
                 queue().lock().unwrap_or_else(|e| e.into_inner()).push(ev);
@@ -756,32 +898,88 @@ mod wasm_overlay {
             r#"
             <div class="kc-header" id="kc_header"></div>
             <div class="kc-messages" id="kc_messages"></div>
+            <div class="kc-ac" id="kc_ac" style="display:none"></div>
             <div class="kc-composer">
-              <textarea id="kc_input" rows="2" placeholder="Ask Kaage Copilot or type /provider, /model, /mode, /node, /status..."></textarea>
-              <button class="kc-btn kc-btn-primary" id="kc_send" onclick="(function(){var i=document.getElementById('kc_input');if(i&&i.value.trim()){window.__kaageDispatch('submit',i.value);i.value='';}})()">Send</button>
+              <textarea id="kc_input" rows="2" placeholder="Ask Kaage Copilot or type / for commands (/model, /provider, /remember, /test)..."></textarea>
+              <button class="kc-btn kc-btn-primary" id="kc_send" onclick="(function(){var i=document.getElementById('kc_input');if(i&&i.value.trim()){window.__kaageDispatch('submit',i.value);i.value='';var ac=document.getElementById('kc_ac');if(ac){ac.style.display='none';ac.innerHTML='';}}})()">Send</button>
               <button class="kc-btn" id="kc_stop" style="display:none" onclick="window.__kaageDispatch('cancel','')">Stop</button>
             </div>
             "#,
         );
         root.append_child(&pane).ok()?;
 
-        // Wire Enter to submit (Shift+Enter inserts newline)
+        // Wire live slash-command autocomplete & keyboard navigation (ArrowUp/Down, Tab, Enter, Escape)
         if let Some(ta) = doc.get_element_by_id("kc_input") {
+            let on_input = Closure::<dyn FnMut(web_sys::Event)>::new(move |_e: web_sys::Event| {
+                refresh_autocomplete(true);
+            });
+            let _ = ta.add_event_listener_with_callback("input", on_input.as_ref().unchecked_ref());
+            on_input.forget();
+
             let on_kd = Closure::<dyn FnMut(web_sys::KeyboardEvent)>::new(
                 move |e: web_sys::KeyboardEvent| {
+                    let input = current_input_value();
+                    let models = ac_models().lock().unwrap_or_else(|err| err.into_inner()).clone();
+                    let items = super::compute_slash_completions(&input, &models);
+                    let ac_open = !items.is_empty()
+                        && web_sys::window()
+                            .and_then(|w| w.document())
+                            .and_then(|d| d.get_element_by_id("kc_ac"))
+                            .and_then(|el| el.get_attribute("style"))
+                            .is_some_and(|s| s.contains("block"));
+
+                    if ac_open {
+                        match e.key().as_str() {
+                            "ArrowDown" => {
+                                e.prevent_default();
+                                let mut idx = ac_index().lock().unwrap_or_else(|err| err.into_inner());
+                                *idx = (*idx + 1) % items.len();
+                                drop(idx);
+                                refresh_autocomplete(false);
+                                return;
+                            }
+                            "ArrowUp" => {
+                                e.prevent_default();
+                                let mut idx = ac_index().lock().unwrap_or_else(|err| err.into_inner());
+                                *idx = if *idx == 0 { items.len() - 1 } else { *idx - 1 };
+                                drop(idx);
+                                refresh_autocomplete(false);
+                                return;
+                            }
+                            "Escape" => {
+                                e.prevent_default();
+                                hide_autocomplete();
+                                return;
+                            }
+                            "Tab" => {
+                                e.prevent_default();
+                                let idx = *ac_index().lock().unwrap_or_else(|err| err.into_inner());
+                                apply_autocomplete_selection(idx, false);
+                                return;
+                            }
+                            "Enter" if !e.shift_key() => {
+                                let idx = *ac_index().lock().unwrap_or_else(|err| err.into_inner());
+                                if let Some(chosen) = items.get(idx)
+                                    && chosen.insert.trim() != input.trim()
+                                {
+                                    e.prevent_default();
+                                    apply_autocomplete_selection(idx, true);
+                                    return;
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+
                     if e.key() == "Enter" && !e.shift_key() {
                         e.prevent_default();
-                        if let Some(d) = web_sys::window().and_then(|w| w.document())
-                            && let Some(el) = d.get_element_by_id("kc_input")
-                            && let Ok(val) = js_sys::Reflect::get(&el, &"value".into())
-                            && let Some(txt) = val.as_string()
-                            && !txt.trim().is_empty()
-                        {
-                            let _ = js_sys::Reflect::set(&el, &"value".into(), &"".into());
+                        if !input.trim().is_empty() {
+                            set_input_value("");
+                            hide_autocomplete();
                             queue()
                                 .lock()
                                 .unwrap_or_else(|err| err.into_inner())
-                                .push(RawDomEvent::Submit(txt));
+                                .push(RawDomEvent::Submit(input));
                         }
                     }
                 },
@@ -1023,6 +1221,14 @@ mod wasm_overlay {
                         ClientMsg::TestCopilotConnection,
                     ));
                 }
+                RawDomEvent::FetchModels => {
+                    out.push(CopilotCrossAction::SendClientMsg(
+                        ClientMsg::ListCopilotModels,
+                    ));
+                }
+                RawDomEvent::AcPick(idx) => {
+                    apply_autocomplete_selection(idx, true);
+                }
             }
         }
         out
@@ -1157,6 +1363,121 @@ mod wasm_overlay {
     fn js_str(s: &str) -> String {
         s.replace('\\', "\\\\").replace('\'', "\\'")
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SlashCompletion {
+    pub insert: String,
+    pub label: String,
+    pub hint: String,
+    pub auto_submit: bool,
+}
+
+/// Compute slash-command and argument completions for the Copilot composer.
+#[allow(dead_code)]
+pub fn compute_slash_completions(input: &str, available_models: &[String]) -> Vec<SlashCompletion> {
+    if !input.starts_with('/') || input.contains('\n') {
+        return Vec::new();
+    }
+
+    // Argument completion when a command followed by space is typed
+    if let Some((cmd_raw, arg_raw)) = input.split_once(' ') {
+        let cmd = cmd_raw.to_ascii_lowercase();
+        let arg = arg_raw.trim_start();
+        let arg_lc = arg.to_ascii_lowercase();
+        return match cmd.as_str() {
+            "/model" => {
+                if available_models.is_empty() {
+                    return vec![SlashCompletion {
+                        insert: String::new(),
+                        label: "Loading models…".into(),
+                        hint: "Querying active LLM endpoint".into(),
+                        auto_submit: false,
+                    }];
+                }
+                available_models
+                    .iter()
+                    .filter(|m| arg_lc.is_empty() || m.to_ascii_lowercase().contains(&arg_lc))
+                    .take(15)
+                    .map(|m| SlashCompletion {
+                        insert: format!("/model {m}"),
+                        label: m.clone(),
+                        hint: "Switch active model".into(),
+                        auto_submit: true,
+                    })
+                    .collect()
+            }
+            "/provider" => [
+                ("gemini", "Google Gemini"),
+                ("openai", "OpenAI"),
+                ("claude", "Anthropic Claude"),
+                ("local", "Local (Ollama / vLLM / Unsloth)"),
+            ]
+            .into_iter()
+            .filter(|(k, _)| arg_lc.is_empty() || k.starts_with(&arg_lc))
+            .map(|(k, desc)| SlashCompletion {
+                insert: format!("/provider {k}"),
+                label: k.to_string(),
+                hint: desc.to_string(),
+                auto_submit: true,
+            })
+            .collect(),
+            "/mode" => [
+                ("managed", "Confirm mutating actions (default)"),
+                ("monitored", "Read-only diagnostics only"),
+            ]
+            .into_iter()
+            .filter(|(k, _)| arg_lc.is_empty() || k.starts_with(&arg_lc))
+            .map(|(k, desc)| SlashCompletion {
+                insert: format!("/mode {k}"),
+                label: k.to_string(),
+                hint: desc.to_string(),
+                auto_submit: true,
+            })
+            .collect(),
+            "/remember" | "/pin" if !arg.contains(':') => [
+                ("system:", "Host hardware, OS, or NixOS fact"),
+                ("service:", "Service port, unit, or container note"),
+                ("preference:", "User workflow or tool preference"),
+                ("incident:", "Resolved outage or debugging fix"),
+            ]
+            .into_iter()
+            .filter(|(k, _)| arg_lc.is_empty() || k.starts_with(&arg_lc))
+            .map(|(k, desc)| SlashCompletion {
+                insert: format!("{cmd} {k} "),
+                label: k.to_string(),
+                hint: desc.to_string(),
+                auto_submit: false,
+            })
+            .collect(),
+            _ => Vec::new(),
+        };
+    }
+
+    // Command name completion
+    let prefix = input.to_ascii_lowercase();
+    let commands = [
+        ("/model", "/model ", "Switch model (lists available models)", false),
+        ("/provider", "/provider ", "Switch backend (gemini/openai/claude/local)", false),
+        ("/mode", "/mode ", "Toggle trust mode (managed/monitored)", false),
+        ("/node", "/node ", "Target a Tailnet peer hostname", false),
+        ("/remember", "/remember ", "Save a fact to SQLite FTS5 host memory", false),
+        ("/pin", "/pin ", "Save a pinned (always-active) host memory", false),
+        ("/memories", "/memories", "List or search saved host memories", true),
+        ("/test", "/test", "Test active LLM connection & print model info", true),
+        ("/status", "/status", "Refresh active Copilot status", true),
+        ("/clear", "/clear", "Clear chat history and start fresh", true),
+    ];
+    commands
+        .into_iter()
+        .filter(|(cmd, _, _, _)| cmd.starts_with(&prefix))
+        .map(|(cmd, insert, hint, auto_submit)| SlashCompletion {
+            insert: insert.to_string(),
+            label: cmd.to_string(),
+            hint: hint.to_string(),
+            auto_submit,
+        })
+        .collect()
 }
 
 fn parse_memory_category(body: &str) -> (String, String) {
@@ -1576,5 +1897,29 @@ mod md_tests {
         let html2 = markdown_to_html(streaming);
         assert!(html2.contains("<details class='kc-think' open><summary>Thinking…</summary>"));
         assert!(html2.contains("Analyzing PSI metrics..."));
+    }
+
+    #[test]
+    fn computes_slash_command_and_model_completions() {
+        let models = vec![
+            "unsloth/Qwen3.8-27B-GGUF".to_string(),
+            "qwen3:30b-a3b".to_string(),
+            "llama3.3:70b".to_string(),
+        ];
+        let cmds = compute_slash_completions("/m", &models);
+        assert!(cmds.iter().any(|c| c.label == "/model"));
+        assert!(cmds.iter().any(|c| c.label == "/mode"));
+        assert!(cmds.iter().any(|c| c.label == "/memories"));
+
+        let all_models = compute_slash_completions("/model ", &models);
+        assert_eq!(all_models.len(), 3);
+        assert_eq!(all_models[0].insert, "/model unsloth/Qwen3.8-27B-GGUF");
+
+        let filtered = compute_slash_completions("/model qwen", &models);
+        assert_eq!(filtered.len(), 2);
+
+        let provs = compute_slash_completions("/provider lo", &models);
+        assert_eq!(provs.len(), 1);
+        assert_eq!(provs[0].insert, "/provider local");
     }
 }

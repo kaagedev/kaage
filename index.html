@@ -266,6 +266,36 @@
       border-top: 1px solid var(--kaage-border, #3e4858);
       background: var(--kaage-alt, #212731);
     }
+    .kc-ac {
+      max-height: 210px;
+      overflow-y: auto;
+      border-top: 1px solid var(--kaage-accent, #ffb838);
+      background: var(--kaage-panel, #16191e);
+      font-family: "IBM Plex Mono", ui-monospace, monospace;
+      font-size: 11.5px;
+    }
+    .kc-ac-item {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 10px;
+      padding: 5px 10px;
+      cursor: pointer;
+      color: var(--kaage-text, #f2f5fa);
+      border-bottom: 1px solid var(--kaage-border, #3e4858);
+    }
+    .kc-ac-item:hover, .kc-ac-item.kc-ac-sel {
+      background: var(--kaage-alt, #212731);
+      color: var(--kaage-accent, #ffb838);
+    }
+    .kc-ac-hint {
+      font-family: "IBM Plex Sans", -apple-system, sans-serif;
+      font-size: 11px;
+      color: var(--kaage-muted, #aeb9ca);
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
     .kc-composer textarea {
       flex: 1;
       resize: none;

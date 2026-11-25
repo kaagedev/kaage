@@ -934,6 +934,14 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
                     let _ = tx.send(ServerMsg::CopilotConnectionTest { ok, summary });
                 });
             }
+            ClientMsg::ListCopilotModels => {
+                let copilot = Arc::clone(&state.copilot);
+                let tx = out_tx.clone();
+                tokio::task::spawn_blocking(move || {
+                    let models = copilot.list_active_models();
+                    let _ = tx.send(ServerMsg::CopilotModels(models));
+                });
+            }
             ClientMsg::SetCopilotOptimizations(opts) => {
                 match state.copilot.set_optimizations(opts) {
                     Ok(st) => {
