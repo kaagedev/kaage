@@ -320,7 +320,108 @@
     .kc-btn:hover { border-color: var(--kaage-accent, #ffb838); }
     .kc-btn-primary { border-color: var(--kaage-accent, #ffb838); color: var(--kaage-accent, #ffb838); }
     .kc-btn-danger { border-color: var(--kaage-red, #f87171); color: var(--kaage-red, #f87171); }
+    .kc-svg-card {
+      margin: 6px 0;
+      border: 1px solid var(--kaage-code-border, #3a4659);
+      background: var(--kaage-code-bg, #181e27);
+      border-radius: 4px;
+      overflow: hidden;
+    }
+    .kc-svg-bar {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 3px 8px;
+      background: var(--kaage-alt, #212731);
+      border-bottom: 1px solid var(--kaage-code-border, #3a4659);
+    }
+    .kc-svg-label {
+      font-family: "IBM Plex Mono", ui-monospace, monospace;
+      font-size: 10px;
+      color: var(--kaage-muted, #aeb9ca);
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+    }
+    .kc-svg-copy {
+      padding: 2px 8px;
+      font-size: 10.5px;
+    }
+    .kc-svg-stage {
+      padding: 10px;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      background: var(--kaage-well, #101216);
+      overflow-x: auto;
+    }
+    .kc-svg-img {
+      max-width: 100%;
+      height: auto;
+      display: block;
+    }
+    .kc-svg-src {
+      border-top: 1px solid var(--kaage-code-border, #3a4659);
+      padding: 4px 8px;
+    }
+    .kc-svg-src summary {
+      cursor: pointer;
+      font-family: "IBM Plex Mono", ui-monospace, monospace;
+      font-size: 10.5px;
+      color: var(--kaage-muted, #aeb9ca);
+      user-select: none;
+    }
+    .kc-svg-src .kc-pre {
+      margin: 6px 0 2px 0;
+      padding: 6px;
+      border: 1px solid var(--kaage-border, #3e4858);
+      max-height: 240px;
+      overflow: auto;
+    }
   </style>
+  <script>
+    window.__kaageCopySvg = function (btn) {
+      var card = btn && btn.closest ? btn.closest('.kc-svg-card') : null;
+      var code = card ? card.querySelector('.kc-svg-src code') : null;
+      var src = code ? (code.textContent || '') : '';
+      if (!src) return;
+      var finish = function (ok) {
+        var orig = btn.getAttribute('data-orig') || btn.textContent || 'Copy SVG';
+        btn.setAttribute('data-orig', orig);
+        btn.textContent = ok ? 'Copied!' : 'Copy failed';
+        setTimeout(function () { btn.textContent = orig; }, 1500);
+      };
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(src).then(
+          function () { finish(true); },
+          function () {
+            try {
+              var ta = document.createElement('textarea');
+              ta.value = src;
+              ta.style.position = 'fixed';
+              ta.style.opacity = '0';
+              document.body.appendChild(ta);
+              ta.select();
+              var ok = document.execCommand('copy');
+              document.body.removeChild(ta);
+              finish(!!ok);
+            } catch (_) { finish(false); }
+          }
+        );
+      } else {
+        try {
+          var ta = document.createElement('textarea');
+          ta.value = src;
+          ta.style.position = 'fixed';
+          ta.style.opacity = '0';
+          document.body.appendChild(ta);
+          ta.select();
+          var ok = document.execCommand('copy');
+          document.body.removeChild(ta);
+          finish(!!ok);
+        } catch (_) { finish(false); }
+      }
+    };
+  </script>
 </head>
 <body>
   <canvas id="kaage_canvas"></canvas>

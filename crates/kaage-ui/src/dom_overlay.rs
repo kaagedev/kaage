@@ -1627,6 +1627,17 @@ fn render_markdown_blocks(md: &str) -> String {
                 code.push_str(lines[i]);
                 i += 1;
             }
+            let lang_lc = lang.to_ascii_lowercase();
+            let is_svg_fence = lang_lc == "svg"
+                || lang_lc == "image/svg+xml"
+                || ((lang_lc.is_empty() || lang_lc == "xml" || lang_lc == "html")
+                    && code.trim_start().to_ascii_lowercase().starts_with("<svg"));
+            if is_svg_fence
+                && let Some(svg_doc) = normalize_svg_document(&code)
+            {
+                out.push_str(&render_svg_card(&svg_doc));
+                continue;
+            }
             out.push_str("<div class='kc-codeblock'>");
             if !lang.is_empty() {
                 out.push_str(&format!(
@@ -1638,6 +1649,35 @@ fn render_markdown_blocks(md: &str) -> String {
                 "<pre class='kc-pre'><code>{}</code></pre></div>",
                 escape_html_text(&code)
             ));
+            continue;
+        }
+
+        // Standalone raw <svg ...>...</svg> block
+        if trimmed.to_ascii_lowercase().starts_with("<svg") {
+            let mut raw_svg = String::new();
+            let mut found_close = false;
+            while i < lines.len() {
+                if !raw_svg.is_empty() {
+                    raw_svg.push('\n');
+                }
+                raw_svg.push_str(lines[i]);
+                let has_close = lines[i].to_ascii_lowercase().contains("</svg>");
+                i += 1;
+                if has_close {
+                    found_close = true;
+                    break;
+                }
+            }
+            if found_close
+                && let Some(svg_doc) = normalize_svg_document(&raw_svg)
+            {
+                out.push_str(&render_svg_card(&svg_doc));
+            } else {
+                out.push_str(&format!(
+                    "<div class='kc-codeblock'><div class='kc-code-lang'>svg</div><pre class='kc-pre'><code>{}</code></pre></div>",
+                    escape_html_text(&raw_svg)
+                ));
+            }
             continue;
         }
 
@@ -1739,6 +1779,7 @@ fn render_markdown_blocks(md: &str) -> String {
             if t.is_empty()
                 || t.starts_with("```")
                 || t.starts_with('>')
+                || t.to_ascii_lowercase().starts_with("<svg")
                 || is_ul_item(t)
                 || strip_ol_prefix(t).is_some()
                 || ((1..=6).contains(&h) && t.as_bytes().get(h) == Some(&b' '))
@@ -1866,6 +1907,69 @@ fn replace_delimited(input: &str, delim: &str, open: &str, close: &str) -> Strin
     out
 }
 
+fn normalize_svg_document(raw: &str) -> Option<String> {
+    let lower = raw.to_ascii_lowercase();
+    let start = lower.find("<svg")?;
+    let end_rel = lower[start..].rfind("</svg>")?;
+    let end = start + end_rel + "</svg>".len();
+    let svg = raw[start..end].trim();
+    let open_end = svg.find('>')?;
+    let open_tag = &svg[..=open_end];
+    if open_tag.to_ascii_lowercase().contains("xmlns=") {
+        Some(svg.to_string())
+    } else {
+        let mut out = String::with_capacity(svg.len() + 36);
+        out.push_str(&svg[..4]);
+        out.push_str(" xmlns=\"http://www.w3.org/2000/svg\"");
+        out.push_str(&svg[4..]);
+        Some(out)
+    }
+}
+
+fn base64_encode(bytes: &[u8]) -> String {
+    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for chunk in bytes.chunks(3) {
+        let b0 = chunk[0] as u32;
+        let b1 = chunk.get(1).copied().unwrap_or(0) as u32;
+        let b2 = chunk.get(2).copied().unwrap_or(0) as u32;
+        let n = (b0 << 16) | (b1 << 8) | b2;
+        out.push(TABLE[((n >> 18) & 0x3f) as usize] as char);
+        out.push(TABLE[((n >> 12) & 0x3f) as usize] as char);
+        if chunk.len() > 1 {
+            out.push(TABLE[((n >> 6) & 0x3f) as usize] as char);
+        } else {
+            out.push('=');
+        }
+        if chunk.len() > 2 {
+            out.push(TABLE[(n & 0x3f) as usize] as char);
+        } else {
+            out.push('=');
+        }
+    }
+    out
+}
+
+fn render_svg_card(svg_doc: &str) -> String {
+    let b64 = base64_encode(svg_doc.as_bytes());
+    let escaped = escape_html_text(svg_doc);
+    format!(
+        "<div class='kc-svg-card'>\
+           <div class='kc-svg-bar'>\
+             <span class='kc-svg-label'>SVG</span>\
+             <button type='button' class='kc-btn kc-svg-copy' onclick=\"window.__kaageCopySvg(this)\">Copy SVG</button>\
+           </div>\
+           <div class='kc-svg-stage'>\
+             <img class='kc-svg-img' src='data:image/svg+xml;base64,{b64}' alt='Rendered SVG' />\
+           </div>\
+           <details class='kc-svg-src'>\
+             <summary>View SVG source</summary>\
+             <pre class='kc-pre'><code>{escaped}</code></pre>\
+           </details>\
+         </div>"
+    )
+}
+
 #[cfg(test)]
 mod md_tests {
     use super::*;
@@ -1921,5 +2025,20 @@ mod md_tests {
         let provs = compute_slash_completions("/provider lo", &models);
         assert_eq!(provs.len(), 1);
         assert_eq!(provs[0].insert, "/provider local");
+    }
+
+    #[test]
+    fn renders_fenced_and_raw_svg_as_sandboxed_data_uri_with_view_and_copy() {
+        let md = "Here is a badge:\n\n```svg\n<svg viewBox=\"0 0 100 40\"><rect width=\"100\" height=\"40\" fill=\"#ffb838\"/></svg>\n```\n\nAnd raw:\n\n<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 10 10\"><circle cx=\"5\" cy=\"5\" r=\"4\"/></svg>";
+        let html = markdown_to_html(md);
+        assert_eq!(html.matches("class='kc-svg-card'").count(), 2);
+        assert_eq!(html.matches("src='data:image/svg+xml;base64,").count(), 2);
+        assert_eq!(html.matches("window.__kaageCopySvg(this)").count(), 2);
+        assert_eq!(html.matches("<summary>View SVG source</summary>").count(), 2);
+        // Missing xmlns was injected into the first SVG
+        assert!(html.contains("xmlns=&quot;http://www.w3.org/2000/svg&quot;"));
+        // Raw <svg> is never injected directly into DOM (only inside <img> data URI and escaped <code>)
+        assert!(!html.contains("<svg "));
+        assert_eq!(base64_encode(b"kaage"), "a2FhZ2U=");
     }
 }
