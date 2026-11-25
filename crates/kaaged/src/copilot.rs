@@ -753,30 +753,62 @@ impl Models for KaageModels {
         context: TranscriptContext,
         options: SimpleStreamOptions,
     ) -> AssistantMessageEventStream {
+        let endpoint = format!(
+            "{}{}",
+            options
+                .base_url
+                .as_deref()
+                .filter(|s| !s.is_empty())
+                .unwrap_or(&model.base_url)
+                .trim_end_matches('/'),
+            if model.api == "anthropic-messages" {
+                "/v1/messages"
+            } else {
+                "/chat/completions"
+            }
+        );
+        let req_bytes = serde_json::to_vec(&context.messages)
+            .map(|v| v.len())
+            .unwrap_or(0);
+        let model_id = model.id.clone();
+        tracing::info!("copilot req -> {endpoint} (model={model_id}, req_bytes={req_bytes})");
+
+        let started = std::time::Instant::now();
         let inner = self.providers.stream_simple(model, context, options);
         let outer = AssistantMessageEventStream::new();
         let outer_tx = outer.clone();
         let core = Arc::clone(&self.core);
 
         std::thread::spawn(move || {
+            let mut streamed_bytes: usize = 0;
+            let mut had_error = false;
             while let Some(event) = inner.next_event() {
-                if let Some(turn) = core
-                    .active_turn
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .clone()
-                {
-                    match &event {
-                        AssistantMessageEvent::TextDelta { delta, .. } if !delta.is_empty() => {
+                match &event {
+                    AssistantMessageEvent::TextDelta { delta, .. } if !delta.is_empty() => {
+                        streamed_bytes += delta.len();
+                        if let Some(turn) = core
+                            .active_turn
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .clone()
+                        {
                             let _ = turn.out_tx.send(ServerMsg::CopilotChunk {
                                 request_id: turn.request_id,
                                 delta: delta.clone(),
                                 done: false,
                             });
                         }
-                        AssistantMessageEvent::Error { error, .. } => {
-                            if let Some(ref msg) = error.error_message
-                                && !msg.is_empty()
+                    }
+                    AssistantMessageEvent::Error { error, .. } => {
+                        had_error = true;
+                        if let Some(ref msg) = error.error_message
+                            && !msg.is_empty()
+                        {
+                            if let Some(turn) = core
+                                .active_turn
+                                .lock()
+                                .unwrap_or_else(|e| e.into_inner())
+                                .clone()
                             {
                                 let _ = turn.out_tx.send(ServerMsg::CopilotChunk {
                                     request_id: turn.request_id,
@@ -785,12 +817,28 @@ impl Models for KaageModels {
                                 });
                             }
                         }
-                        _ => {}
                     }
+                    _ => {}
                 }
                 outer_tx.push(event);
             }
-            outer_tx.end(inner.result());
+            let final_res = inner.result();
+            let res_bytes = final_res
+                .as_ref()
+                .and_then(|m| serde_json::to_vec(&m.content).ok())
+                .map(|v| v.len())
+                .unwrap_or(streamed_bytes);
+            let elapsed_ms = started.elapsed().as_millis();
+            if had_error {
+                tracing::warn!(
+                    "copilot res <- {endpoint} (model={model_id}, req_bytes={req_bytes}, res_bytes={res_bytes}, elapsed_ms={elapsed_ms}, status=error)"
+                );
+            } else {
+                tracing::info!(
+                    "copilot res <- {endpoint} (model={model_id}, req_bytes={req_bytes}, res_bytes={res_bytes}, elapsed_ms={elapsed_ms})"
+                );
+            }
+            outer_tx.end(final_res);
         });
 
         outer
@@ -1102,6 +1150,7 @@ impl CopilotManager {
                         out.push(CopilotHistoryMessage {
                             role: "user".into(),
                             text,
+                            ts_ms: u.timestamp,
                         });
                     }
                 }
@@ -1119,6 +1168,7 @@ impl CopilotManager {
                         out.push(CopilotHistoryMessage {
                             role: "assistant".into(),
                             text,
+                            ts_ms: a.timestamp,
                         });
                     }
                 }
@@ -1308,8 +1358,12 @@ impl CopilotManager {
             match pi_http_send(&req, Some(&cancel)) {
                 Ok(resp) if resp.ok() => {
                     let body = resp.text().unwrap_or_default();
+                    let res_bytes = body.len();
                     let models = parse_models_response(&body);
-                    tracing::info!("Local LLM endpoint reachable at {probe_url}: {} model(s)", models.len());
+                    tracing::info!(
+                        "copilot probe <- {probe_url} (req_bytes=0, res_bytes={res_bytes}, models={})",
+                        models.len()
+                    );
                     let msg = if models.is_empty() {
                         format!("Connected to {probe_url} (0 models returned)")
                     } else {

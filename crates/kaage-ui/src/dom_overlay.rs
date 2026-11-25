@@ -19,11 +19,15 @@ pub enum CopilotCrossAction {
 
 #[derive(Debug, Clone)]
 pub enum CopilotItem {
-    User(String),
+    User {
+        text: String,
+        ts_ms: u64,
+    },
     Assistant {
         request_id: u64,
         text: String,
         done: bool,
+        ts_ms: u64,
     },
     ToolStatus {
         tool_name: String,
@@ -63,6 +67,7 @@ impl CopilotWindow {
             request_id: rid,
             text,
             done: is_done,
+            ..
         }) = self.items.last_mut()
             && *rid == request_id
         {
@@ -75,6 +80,7 @@ impl CopilotWindow {
                 request_id,
                 text: delta,
                 done,
+                ts_ms: now_epoch_ms(),
             });
         }
         if done && self.active_request_id == Some(request_id) {
@@ -104,12 +110,16 @@ impl CopilotWindow {
         self.items.clear();
         for (idx, msg) in history.iter().enumerate() {
             if msg.role == "user" {
-                self.items.push(CopilotItem::User(msg.text.clone()));
+                self.items.push(CopilotItem::User {
+                    text: msg.text.clone(),
+                    ts_ms: msg.ts_ms,
+                });
             } else {
                 self.items.push(CopilotItem::Assistant {
                     request_id: idx as u64,
                     text: msg.text.clone(),
                     done: true,
+                    ts_ms: msg.ts_ms,
                 });
             }
         }
@@ -247,7 +257,10 @@ impl CopilotWindow {
         let req_id = self.next_request_id;
         self.next_request_id += 1;
         self.active_request_id = Some(req_id);
-        self.items.push(CopilotItem::User(trimmed.to_string()));
+        self.items.push(CopilotItem::User {
+            text: trimmed.to_string(),
+            ts_ms: now_epoch_ms(),
+        });
         vec![CopilotCrossAction::SendClientMsg(ClientMsg::AskCopilot {
             request_id: req_id,
             prompt: trimmed.to_string(),
@@ -346,21 +359,39 @@ impl CopilotWindow {
             .show(ui, |ui| {
                 for item in &self.items {
                     match item {
-                        CopilotItem::User(txt) => {
+                        CopilotItem::User { text: txt, ts_ms } => {
+                            let (ts_short, _) = format_chat_timestamp(*ts_ms);
                             egui::Frame::NONE
                                 .fill(p.surface_alt)
                                 .stroke(Stroke::new(1.0, p.accent))
                                 .inner_margin(6.0)
                                 .show(ui, |ui| {
-                                    ui.label(RichText::new(format!("You: {txt}")).color(p.text));
+                                    ui.horizontal(|ui| {
+                                        ui.label(RichText::new("YOU").monospace().size(10.0).color(p.accent));
+                                        if !ts_short.is_empty() {
+                                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                                ui.label(RichText::new(ts_short).monospace().size(9.5).color(p.text_muted));
+                                            });
+                                        }
+                                    });
+                                    ui.label(RichText::new(txt).color(p.text));
                                 });
                         }
-                        CopilotItem::Assistant { text, done, .. } => {
+                        CopilotItem::Assistant { text, done, ts_ms, .. } => {
+                            let (ts_short, _) = format_chat_timestamp(*ts_ms);
                             egui::Frame::NONE
                                 .fill(p.well)
                                 .stroke(Stroke::new(1.0, p.border))
                                 .inner_margin(6.0)
                                 .show(ui, |ui| {
+                                    ui.horizontal(|ui| {
+                                        ui.label(RichText::new("COPILOT").monospace().size(10.0).color(p.accent));
+                                        if !ts_short.is_empty() {
+                                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                                ui.label(RichText::new(ts_short).monospace().size(9.5).color(p.text_muted));
+                                            });
+                                        }
+                                    });
                                     let suffix = if *done { "" } else { " ▌" };
                                     ui.label(RichText::new(format!("{text}{suffix}")).color(p.text));
                                 });
@@ -766,16 +797,36 @@ mod wasm_overlay {
             }
             for item in &win.items {
                 match item {
-                    CopilotItem::User(txt) => {
+                    CopilotItem::User { text: txt, ts_ms } => {
+                        let (ts_short, ts_full) = super::format_chat_timestamp(*ts_ms);
+                        let ts_html = if ts_short.is_empty() {
+                            String::new()
+                        } else {
+                            format!(
+                                "<span class='kc-ts' title='{}'>{}</span>",
+                                esc(&ts_full),
+                                esc(&ts_short)
+                            )
+                        };
                         html.push_str(&format!(
-                            "<div class='kc-msg kc-user'><div class='kc-role'>YOU</div><div class='kc-body'>{}</div></div>",
+                            "<div class='kc-msg kc-user'><div class='kc-role'><span>YOU</span>{ts_html}</div><div class='kc-body'>{}</div></div>",
                             esc(txt)
                         ));
                     }
-                    CopilotItem::Assistant { text, done, .. } => {
+                    CopilotItem::Assistant { text, done, ts_ms, .. } => {
+                        let (ts_short, ts_full) = super::format_chat_timestamp(*ts_ms);
+                        let ts_html = if ts_short.is_empty() {
+                            String::new()
+                        } else {
+                            format!(
+                                "<span class='kc-ts' title='{}'>{}</span>",
+                                esc(&ts_full),
+                                esc(&ts_short)
+                            )
+                        };
                         let cursor = if *done { "" } else { "<span class='kc-cursor'>▌</span>" };
                         html.push_str(&format!(
-                            "<div class='kc-msg kc-assistant'><div class='kc-role'>COPILOT</div><div class='kc-md'>{}{cursor}</div></div>",
+                            "<div class='kc-msg kc-assistant'><div class='kc-role'><span>COPILOT</span>{ts_html}</div><div class='kc-md'>{}{cursor}</div></div>",
                             super::markdown_to_html(text)
                         ));
                     }
@@ -992,6 +1043,49 @@ mod wasm_overlay {
 
     fn js_str(s: &str) -> String {
         s.replace('\\', "\\\\").replace('\'', "\\'")
+    }
+}
+
+fn now_epoch_ms() -> u64 {
+    #[cfg(target_arch = "wasm32")]
+    {
+        js_sys::Date::now().max(0.0) as u64
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64
+    }
+}
+
+/// Format an epoch-millisecond timestamp into `(short_label, full_tooltip)` for chat headers.
+fn format_chat_timestamp(ts_ms: u64) -> (String, String) {
+    if ts_ms == 0 {
+        return (String::new(), String::new());
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        let d = js_sys::Date::new(&wasm_bindgen::JsValue::from_f64(ts_ms as f64));
+        let hh = d.get_hours();
+        let mm = d.get_minutes();
+        let yyyy = d.get_full_year();
+        let mon = d.get_month() + 1;
+        let dd = d.get_date();
+        let ss = d.get_seconds();
+        (
+            format!("{hh:02}:{mm:02}"),
+            format!("{yyyy:04}-{mon:02}-{dd:02} {hh:02}:{mm:02}:{ss:02}"),
+        )
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let secs = (ts_ms / 1000) % 86_400;
+        let hh = secs / 3600;
+        let mm = (secs % 3600) / 60;
+        let ss = secs % 60;
+        (format!("{hh:02}:{mm:02}"), format!("{hh:02}:{mm:02}:{ss:02} UTC"))
     }
 }
 

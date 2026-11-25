@@ -582,6 +582,7 @@ pub struct LocalLlmEndpoint {
 pub struct CopilotHistoryMessage {
     pub role: String,
     pub text: String,
+    pub ts_ms: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
