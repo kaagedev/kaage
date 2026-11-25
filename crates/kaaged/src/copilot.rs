@@ -752,7 +752,7 @@ impl CopilotCore {
             // --- Tier 2: Guarded Mutation Tools (Requires Managed Mode + User Approval) ---
             "control_unit_or_container" => {
                 if trust_mode == TrustMode::Monitored {
-                    return "Blocked: Kaage Copilot is in Monitored (read-only) mode. Switch to Managed mode with `/mode manage` to perform mutations.".into();
+                    return "Blocked: Cawpilot is in Monitored (read-only) mode. Switch to Managed mode with `/mode manage` to perform mutations.".into();
                 }
                 let kind = args.get("kind").and_then(Value::as_str).unwrap_or("unit");
                 let target = args.get("target").and_then(Value::as_str).unwrap_or("");
@@ -797,7 +797,7 @@ impl CopilotCore {
 
             "propose_nix_edit" => {
                 if trust_mode == TrustMode::Monitored {
-                    return "Blocked: Kaage Copilot is in Monitored (read-only) mode.".into();
+                    return "Blocked: Cawpilot is in Monitored (read-only) mode.".into();
                 }
                 let path_str = args.get("file_path").and_then(Value::as_str).unwrap_or("");
                 let new_content = args.get("new_content").and_then(Value::as_str).unwrap_or("");
@@ -849,7 +849,7 @@ impl CopilotCore {
 
             "run_diagnostic_command" => {
                 if trust_mode == TrustMode::Monitored {
-                    return "Blocked: Kaage Copilot is in Monitored (read-only) mode.".into();
+                    return "Blocked: Cawpilot is in Monitored (read-only) mode.".into();
                 }
                 let cmd = args.get("command").and_then(Value::as_str).unwrap_or("");
                 let summary = args
@@ -1100,7 +1100,7 @@ impl Models for KaageModels {
                             {
                                 let _ = turn.out_tx.send(ServerMsg::CopilotChunk {
                                     request_id: turn.request_id,
-                                    delta: format!("\n[Kaage Copilot error: {msg}]"),
+                                    delta: format!("\n[Cawpilot error: {msg}]"),
                                     done: false,
                                 });
                             }
@@ -1265,13 +1265,13 @@ impl CopilotManager {
         let memory = match MemoryStore::open(&db_path) {
             Ok(store) => {
                 tracing::info!(
-                    "Kaage Copilot FTS5 memory initialized at {}",
+                    "Cawpilot FTS5 memory initialized at {}",
                     db_path.display()
                 );
                 Some(Arc::new(store))
             }
             Err(err) => {
-                tracing::warn!("Kaage Copilot FTS5 memory disabled: {err}");
+                tracing::warn!("Cawpilot FTS5 memory disabled: {err}");
                 None
             }
         };
@@ -1322,14 +1322,14 @@ impl CopilotManager {
         {
             Ok(sql) => {
                 tracing::info!(
-                    "Kaage Copilot durable SQLite store initialized at {}",
+                    "Cawpilot durable SQLite store initialized at {}",
                     durable_db_path.display()
                 );
                 Arc::new(sql)
             }
             Err(err) => {
                 tracing::warn!(
-                    "Kaage Copilot durable SQLite store failed ({err}), falling back to in-memory storage"
+                    "Cawpilot durable SQLite store failed ({err}), falling back to in-memory storage"
                 );
                 Arc::new(MemoryStorage::new())
             }
@@ -1350,11 +1350,11 @@ impl CopilotManager {
                 now: None,
                 env: None,
                 on_report: Some(Arc::new(|err| {
-                    tracing::warn!("Kaage Copilot durable harness report: {err}");
+                    tracing::warn!("Cawpilot durable harness report: {err}");
                 })),
             },
         )
-        .expect("open pi-durable harness for Kaage Copilot");
+        .expect("open pi-durable harness for Cawpilot");
 
         let init_cancel = CancelToken::new();
         let _ = harness.root(
@@ -2372,7 +2372,7 @@ impl CopilotManager {
                 let _ = out_tx.send(ServerMsg::CopilotChunk {
                     request_id,
                     delta: format!(
-                        "Kaage Copilot is missing `{env_name}` for `{}`. Add the key in the setup banner above or in `kaage-settings → Copilot (AI)`.",
+                        "Cawpilot is missing `{env_name}` for `{}`. Add the key in the setup banner above or in `kaage-settings → Cawpilot (AI)`.",
                         status.provider.label()
                     ),
                     done: true,
@@ -2413,7 +2413,7 @@ impl CopilotManager {
             }
 
             let system_prompt = format!(
-                "You are Kaage Copilot, an expert Linux & NixOS operations assistant embedded inside kaage on host `{}`.\n\
+                "You are Cawpilot, an expert Linux & NixOS operations assistant embedded inside kaage on host `{}`.\n\
                  Active OS: {} (NixOS: {}, generation: {:?}, current-system: {:?}).\n\
                  Configured flake path: {}.\n\
                  Target node: {} · Trust mode: {}.\n\
@@ -2508,7 +2508,7 @@ impl CopilotManager {
                     let msg = if cancel.is_cancelled() {
                         "\n[Cancelled]".to_string()
                     } else {
-                        format!("\n[Kaage Copilot error: {err}]")
+                        format!("\n[Cawpilot error: {err}]")
                     };
                     let _ = out_tx.send(ServerMsg::CopilotChunk {
                         request_id,
@@ -2519,7 +2519,7 @@ impl CopilotManager {
                 Err(join_err) => {
                     let _ = out_tx.send(ServerMsg::CopilotChunk {
                         request_id,
-                        delta: format!("\n[Kaage Copilot worker error: {join_err}]"),
+                        delta: format!("\n[Cawpilot worker error: {join_err}]"),
                         done: true,
                     });
                 }
@@ -2681,7 +2681,7 @@ fn build_kaage_extension(core: Arc<CopilotCore>) -> Extension {
                         return Ok(ToolExecutionResult {
                             content: Some(vec![serde_json::from_value(json!({
                                 "type": "text",
-                                "text": "No active Kaage Copilot session."
+                                "text": "No active Cawpilot session."
                             }))?]),
                             is_error: Some(true),
                             ..Default::default()
@@ -3056,7 +3056,7 @@ mod tests {
         faux.set_responses(vec![FauxResponse::Message(Box::new(
             serde_json::from_value(json!({
                 "role": "assistant",
-                "content": [{"type": "text", "text": "Kaage Copilot durable reply."}],
+                "content": [{"type": "text", "text": "Cawpilot durable reply."}],
                 "api": "faux",
                 "provider": "faux",
                 "model": "faux-1",
@@ -3143,7 +3143,7 @@ mod tests {
         let found = ctx.messages.iter().any(|m| {
             if let Message::Assistant(a) = m {
                 a.content.iter().any(|b| match b {
-                    AssistantBlock::Text(t) => t.text.contains("Kaage Copilot durable reply."),
+                    AssistantBlock::Text(t) => t.text.contains("Cawpilot durable reply."),
                     _ => false,
                 })
             } else {

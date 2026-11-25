@@ -817,7 +817,7 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
                         "Default LLM cleared (will resume last used)".into()
                     };
                     let _ = out_tx.send(ServerMsg::ActionFeedback {
-                        target: "Kaage Copilot".into(),
+                        target: "Cawpilot".into(),
                         ok: true,
                         message: msg,
                     });
@@ -825,7 +825,7 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
                 }
                 Err(err) => {
                     let _ = out_tx.send(ServerMsg::ActionFeedback {
-                        target: "Kaage Copilot".into(),
+                        target: "Cawpilot".into(),
                         ok: false,
                         message: err,
                     });
@@ -949,7 +949,7 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
                     }
                     Err(err) => {
                         let _ = out_tx.send(ServerMsg::ActionFeedback {
-                            target: "Copilot Optimizations".into(),
+                            target: "Cawpilot Optimizations".into(),
                             ok: false,
                             message: err,
                         });
@@ -1004,14 +1004,14 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
                         let _ = tx.send(ServerMsg::CopilotHistory(Vec::new()));
                         let _ = tx.send(ServerMsg::CopilotStatus(copilot.status()));
                         let _ = tx.send(ServerMsg::ActionFeedback {
-                            target: "Kaage Copilot".into(),
+                            target: "Cawpilot".into(),
                             ok: true,
                             message: "Chat history cleared".into(),
                         });
                     }
                     Err(err) => {
                         let _ = tx.send(ServerMsg::ActionFeedback {
-                            target: "Kaage Copilot".into(),
+                            target: "Cawpilot".into(),
                             ok: false,
                             message: err,
                         });

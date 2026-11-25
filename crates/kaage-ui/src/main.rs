@@ -622,7 +622,7 @@ impl KaageApp {
             win.set_available_models(self.copilot_models.clone());
         }
         self.wm.open_window(
-            "Copilot (AI)".into(),
+            "Cawpilot (AI)".into(),
             PaneKind::Copilot(Box::new(win)),
             self.stage_origin(32.0, 24.0),
             Vec2::new(620.0, 520.0),
@@ -951,9 +951,9 @@ impl eframe::App for KaageApp {
                                 self.toast = Some(ToastNotice {
                                     ok,
                                     text: if ok {
-                                        "Kaage Copilot: Connection OK".into()
+                                        "Cawpilot: Connection OK".into()
                                     } else {
-                                        "Kaage Copilot: Connection test failed".into()
+                                        "Cawpilot: Connection test failed".into()
                                     },
                                     expires_at: now + 4.5,
                                     undo_msg: None,

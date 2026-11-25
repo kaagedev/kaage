@@ -303,7 +303,7 @@ impl BeTrackerSidebar {
                         if tracker_row(ui, "⚙   kaage-settings", None, false) {
                             action = Some(TrackerAction::OpenSettings);
                         }
-                        if tracker_row(ui, "✦   Copilot (AI)", None, false) {
+                        if tracker_row(ui, "✦   Cawpilot (AI)", None, false) {
                             action = Some(TrackerAction::OpenCopilot);
                         }
                         if tracker_row(ui, "⊞   Debug Console", None, false) {

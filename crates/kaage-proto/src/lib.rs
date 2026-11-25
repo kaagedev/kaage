@@ -506,7 +506,7 @@ pub struct AppDataSnapshot {
     pub apps: Vec<AppDataDirInfo>,
 }
 
-// --- Kaage Copilot Protocol Types ---
+// --- Cawpilot Protocol Types ---
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum CopilotProvider {

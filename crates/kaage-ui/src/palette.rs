@@ -259,7 +259,7 @@ fn build_items(
     let q = query.trim().to_ascii_lowercase();
     let mut all = vec![
         PaletteItem {
-            label: "Open Kaage Copilot (AI Assistant)".into(),
+            label: "Open Cawpilot (AI Assistant)".into(),
             category: "AI",
             shortcut: "✦".into(),
             action: PaletteAction::OpenCopilot,

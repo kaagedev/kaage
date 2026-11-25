@@ -173,7 +173,7 @@ impl SettingsWindow {
                 self.tab = SettingsTab::AppData;
                 send_msg(ClientMsg::GetAppDataState);
             }
-            if be_toggle_button(ui, "Copilot (AI)", self.tab == SettingsTab::Copilot).clicked() {
+            if be_toggle_button(ui, "Cawpilot (AI)", self.tab == SettingsTab::Copilot).clicked() {
                 self.tab = SettingsTab::Copilot;
                 send_msg(ClientMsg::GetCopilotStatus);
                 send_msg(ClientMsg::ListMemories { query: None });
@@ -728,7 +728,7 @@ impl SettingsWindow {
             });
 
         ui.add_space(10.0);
-        section_title(ui, "COPILOT OPTIMIZATIONS");
+        section_title(ui, "CAWPILOT OPTIMIZATIONS");
         let mut opts = status.map(|s| s.optimizations).unwrap_or_default();
         let mut opts_changed = false;
         egui::Frame::NONE
@@ -817,7 +817,7 @@ impl SettingsWindow {
         section_title(ui, "HOST MEMORIES (SQLITE FTS5)");
         ui.label(
             RichText::new(
-                "Pinned memories are always injected into every Copilot prompt; other memories are recalled automatically via FTS5 search. You can also use `/remember <fact>`, `/pin <fact>`, and `/memories` in Copilot chat.",
+                "Pinned memories are always injected into every Cawpilot prompt; other memories are recalled automatically via FTS5 search. You can also use `/remember <fact>`, `/pin <fact>`, and `/memories` in Cawpilot chat.",
             )
             .size(11.0)
             .color(p.text_muted),

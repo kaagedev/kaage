@@ -54,7 +54,7 @@ impl CopilotWindow {
     pub fn new() -> Self {
         Self {
             items: vec![CopilotItem::SystemNotice(
-                "Kaage Copilot ready. Try asking \"Why is memory high?\" or type `/` for slash command autocomplete (/model, /provider, /remember, /pin, /memories, /test)."
+                "Cawpilot ready. Try asking \"Why is memory high?\" or type `/` for slash command autocomplete (/model, /provider, /remember, /pin, /memories, /test)."
                     .into(),
             )],
             #[cfg(not(target_arch = "wasm32"))]
@@ -290,14 +290,14 @@ impl CopilotWindow {
                 }
                 "status" => {
                     self.items
-                        .push(CopilotItem::SystemNotice("Refreshing Copilot status...".into()));
+                        .push(CopilotItem::SystemNotice("Refreshing Cawpilot status...".into()));
                     return vec![CopilotCrossAction::SendClientMsg(
                         ClientMsg::GetCopilotStatus,
                     )];
                 }
                 "test" => {
                     self.items.push(CopilotItem::SystemNotice(
-                        "Testing active Copilot connection...".into(),
+                        "Testing active Cawpilot connection...".into(),
                     ));
                     return vec![CopilotCrossAction::SendClientMsg(
                         ClientMsg::TestCopilotConnection,
@@ -415,7 +415,7 @@ impl CopilotWindow {
         let mut actions = Vec::new();
 
         ui.horizontal_wrapped(|ui| {
-            ui.label(RichText::new("✦ Kaage Copilot").strong().color(p.accent));
+            ui.label(RichText::new("✦ Cawpilot").strong().color(p.accent));
             if let Some(st) = status {
                 ui.label(
                     RichText::new(format!(
@@ -431,7 +431,7 @@ impl CopilotWindow {
                 );
                 if be_button(ui, "Test Connection").clicked() {
                     self.items.push(CopilotItem::SystemNotice(
-                        "Testing active Copilot connection...".into(),
+                        "Testing active Cawpilot connection...".into(),
                     ));
                     actions.push(CopilotCrossAction::SendClientMsg(
                         ClientMsg::TestCopilotConnection,
@@ -502,7 +502,7 @@ impl CopilotWindow {
                                 .inner_margin(6.0)
                                 .show(ui, |ui| {
                                     ui.horizontal(|ui| {
-                                        ui.label(RichText::new("COPILOT").monospace().size(10.0).color(p.accent));
+                                        ui.label(RichText::new("CAWPILOT").monospace().size(10.0).color(p.accent));
                                         if !ts_short.is_empty() {
                                             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                                                 ui.label(RichText::new(ts_short).monospace().size(9.5).color(p.text_muted));
@@ -540,7 +540,7 @@ impl CopilotWindow {
         ui.horizontal(|ui| {
             let resp = ui.add(
                 egui::TextEdit::singleline(&mut self.input)
-                    .hint_text("Ask Kaage Copilot or type /provider, /model, /mode, /node...")
+                    .hint_text("Ask Cawpilot or type /provider, /model, /mode, /node...")
                     .desired_width((ui.available_width() - 90.0).max(120.0)),
             );
             let enter = resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
@@ -900,7 +900,7 @@ mod wasm_overlay {
             <div class="kc-messages" id="kc_messages"></div>
             <div class="kc-ac" id="kc_ac" style="display:none"></div>
             <div class="kc-composer">
-              <textarea id="kc_input" rows="2" placeholder="Ask Kaage Copilot or type / for commands (/model, /provider, /remember, /test)..."></textarea>
+              <textarea id="kc_input" rows="2" placeholder="Ask Cawpilot or type / for commands (/model, /provider, /remember, /test)..."></textarea>
               <button class="kc-btn kc-btn-primary" id="kc_send" onclick="(function(){var i=document.getElementById('kc_input');if(i&&i.value.trim()){window.__kaageDispatch('submit',i.value);i.value='';var ac=document.getElementById('kc_ac');if(ac){ac.style.display='none';ac.innerHTML='';}}})()">Send</button>
               <button class="kc-btn" id="kc_stop" style="display:none" onclick="window.__kaageDispatch('cancel','')">Stop</button>
             </div>
@@ -1047,7 +1047,7 @@ mod wasm_overlay {
             let html = if let Some(st) = status {
                 let dot = if st.ready { "var(--kaage-green)" } else { "var(--kaage-red)" };
                 format!(
-                    "<span class='kc-title'>✦ Kaage Copilot</span>\
+                    "<span class='kc-title'>✦ Cawpilot</span>\
                      <span class='kc-pill' style='border-color:{dot};color:{dot}'>{} · {}</span>\
                      <span class='kc-pill'>{}</span>\
                      <span class='kc-pill'>@{}</span>\
@@ -1059,7 +1059,7 @@ mod wasm_overlay {
                     esc(&st.target_node),
                 )
             } else {
-                "<span class='kc-title'>✦ Kaage Copilot</span><span class='kc-pill'>connecting…</span>".into()
+                "<span class='kc-title'>✦ Cawpilot</span><span class='kc-pill'>connecting…</span>".into()
             };
             hdr.set_inner_html(&html);
         }
@@ -1128,7 +1128,7 @@ mod wasm_overlay {
                             .map(|s| s.optimizations.collapse_think_blocks)
                             .unwrap_or(true);
                         html.push_str(&format!(
-                            "<div class='kc-msg kc-assistant'><div class='kc-role'><span>COPILOT</span>{ts_html}</div><div class='kc-md'>{}{cursor}</div></div>",
+                            "<div class='kc-msg kc-assistant'><div class='kc-role'><span>CAWPILOT</span>{ts_html}</div><div class='kc-md'>{}{cursor}</div></div>",
                             super::markdown_to_html_with_options(text, collapse_think)
                         ));
                     }
@@ -1214,7 +1214,7 @@ mod wasm_overlay {
                 }
                 RawDomEvent::TestConnection => {
                     win.items.push(CopilotItem::SystemNotice(
-                        "Testing active Copilot connection...".into(),
+                        "Testing active Cawpilot connection...".into(),
                     ));
                     win.dom_dirty = true;
                     out.push(CopilotCrossAction::SendClientMsg(
@@ -1465,7 +1465,7 @@ pub fn compute_slash_completions(input: &str, available_models: &[String]) -> Ve
         ("/pin", "/pin ", "Save a pinned (always-active) host memory", false),
         ("/memories", "/memories", "List or search saved host memories", true),
         ("/test", "/test", "Test active LLM connection & print model info", true),
-        ("/status", "/status", "Refresh active Copilot status", true),
+        ("/status", "/status", "Refresh active Cawpilot status", true),
         ("/clear", "/clear", "Clear chat history and start fresh", true),
     ];
     commands
@@ -1550,7 +1550,7 @@ fn escape_html_text(s: &str) -> String {
     out
 }
 
-/// Convert LLM Markdown output into XSS-safe HTML for the Kaage Copilot DOM overlay.
+/// Convert LLM Markdown output into XSS-safe HTML for the Cawpilot DOM overlay.
 /// Handles `<think>...</think>` reasoning blocks (including streaming unclosed blocks),
 /// fenced code blocks, headings, tables, bullet/numbered lists, blockquotes, horizontal rules,
 /// and inline formatting.

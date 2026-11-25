@@ -302,7 +302,7 @@ impl BeDeskbar {
                     );
                     let resp = ui
                         .interact(ai_rect, Id::unique("topbar_copilot"), Sense::click())
-                        .on_hover_text("Open Kaage Copilot (AI Assistant)");
+                        .on_hover_text("Open Cawpilot (AI Assistant)");
                     painter.rect_filled(
                         ai_rect,
                         CornerRadius::ZERO,

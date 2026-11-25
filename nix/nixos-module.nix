@@ -161,7 +161,7 @@ in
       enable = lib.mkOption {
         type = lib.types.bool;
         default = true;
-        description = "Enable Kaage Copilot conversational NixOS & host administration plane.";
+        description = "Enable Cawpilot conversational NixOS & host administration plane.";
       };
 
       provider = lib.mkOption {
@@ -172,13 +172,13 @@ in
           "local"
         ];
         default = "gemini";
-        description = "Default LLM provider for Kaage Copilot (gemini, openai, claude, or local).";
+        description = "Default LLM provider for Cawpilot (gemini, openai, claude, or local).";
       };
 
       model = lib.mkOption {
         type = lib.types.str;
         default = "gemini-2.5-flash";
-        description = "Default model ID for Kaage Copilot.";
+        description = "Default model ID for Cawpilot.";
       };
 
       trustMode = lib.mkOption {
@@ -193,7 +193,7 @@ in
       flakePath = lib.mkOption {
         type = lib.types.str;
         default = "/home/${cfg.user}/dotfiles";
-        description = "Path to the host NixOS flake repository used by Copilot tools.";
+        description = "Path to the host NixOS flake repository used by Cawpilot tools.";
       };
 
       geminiApiKeyFile = lib.mkOption {
