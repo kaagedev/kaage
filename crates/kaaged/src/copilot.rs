@@ -42,6 +42,11 @@ const GEMINI_BASE_URL: &str = "https://generativelanguage.googleapis.com/v1beta/
 const OPENAI_BASE_URL: &str = "https://api.openai.com/v1";
 const ANTHROPIC_BASE_URL: &str = "https://api.anthropic.com";
 const DEFAULT_LOCAL_ENDPOINT: &str = "http://127.0.0.1:11434/v1/chat/completions";
+const DEFAULT_LOCAL_CTX_WINDOW: u64 = 32_768;
+
+fn default_local_ctx() -> u64 {
+    DEFAULT_LOCAL_CTX_WINDOW
+}
 
 pub struct CopilotConfig {
     pub provider: CopilotProvider,
@@ -50,6 +55,7 @@ pub struct CopilotConfig {
     pub target_node: String,
     pub flake_path: String,
     pub local_endpoint: String,
+    pub local_context_window: u64,
     pub active_local_name: Option<String>,
 }
 
@@ -59,6 +65,8 @@ struct StoredLocalLlm {
     url: String,
     #[serde(default)]
     api_key: Option<String>,
+    #[serde(default = "default_local_ctx")]
+    context_window: u64,
 }
 
 #[derive(Default, Clone, serde::Serialize, serde::Deserialize)]
@@ -254,6 +262,7 @@ impl CopilotCore {
                     .api_key
                     .as_deref()
                     .is_some_and(|k| !k.trim().is_empty()),
+                context_window: e.context_window,
             })
             .collect();
         let dk = self.disk_keys.read().unwrap_or_else(|e| e.into_inner());
@@ -371,6 +380,14 @@ impl CopilotCore {
         out_tx: &mpsc::UnboundedSender<ServerMsg>,
     ) -> String {
         let is_remote = !target_node.is_empty() && target_node != self.local_hostname;
+        let max_chars = {
+            let cfg = self.config.read().unwrap_or_else(|e| e.into_inner());
+            if cfg.provider == CopilotProvider::Local && cfg.local_context_window <= 32_768 {
+                6_000
+            } else {
+                12_000
+            }
+        };
 
         match name {
             // --- Tier 1: Read-Only Tools (Auto-Approved) ---
@@ -541,7 +558,7 @@ impl CopilotCore {
                 }
                 match fs::read_to_string(&expanded) {
                     Ok(content) => {
-                        let truncated: String = content.chars().take(12_000).collect();
+                        let truncated: String = content.chars().take(max_chars).collect();
                         redact_secrets(&truncated)
                     }
                     Err(e) => format!("Failed to read {}: {e}", expanded.display()),
@@ -799,14 +816,22 @@ impl Models for KaageModels {
                 Some(m)
             }
             "kaage-local" => {
-                let ep = self
-                    .core
-                    .config
-                    .read()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .local_endpoint
-                    .clone();
-                let mut m = Model::new(provider, id, "openai-completions", 128_000, 8_192, false);
+                let (ep, ctx_window) = {
+                    let cfg = self.core.config.read().unwrap_or_else(|e| e.into_inner());
+                    (
+                        cfg.local_endpoint.clone(),
+                        cfg.local_context_window.clamp(4_096, 1_000_000),
+                    )
+                };
+                let max_tokens = (ctx_window / 8).clamp(1_024, 8_192);
+                let mut m = Model::new(
+                    provider,
+                    id,
+                    "openai-completions",
+                    ctx_window,
+                    max_tokens,
+                    false,
+                );
                 m.base_url = normalize_openai_base_url(&ep);
                 Some(m)
             }
@@ -1055,6 +1080,7 @@ impl CopilotManager {
             }
         };
 
+        let mut local_context_window = DEFAULT_LOCAL_CTX_WINDOW;
         if let Some(matched) = saved_local_llms.iter().find(|e| {
             active_local_name
                 .as_deref()
@@ -1064,6 +1090,7 @@ impl CopilotManager {
             if active_local_name.is_none() {
                 active_local_name = Some(matched.name.clone());
             }
+            local_context_window = matched.context_window;
             if provider == CopilotProvider::Local && saved_keys.local.is_none() {
                 saved_keys.local = matched.api_key.clone();
             }
@@ -1077,6 +1104,7 @@ impl CopilotManager {
                 target_node: local_hostname.clone(),
                 flake_path,
                 local_endpoint,
+                local_context_window,
                 active_local_name,
             }),
             default_backend: RwLock::new(saved_config.default_backend),
@@ -1447,6 +1475,7 @@ impl CopilotManager {
         name: String,
         url: String,
         api_key: Option<String>,
+        context_window: Option<u64>,
         persist: bool,
     ) -> Result<CopilotStatus, String> {
         let name = name.trim().to_string();
@@ -1460,6 +1489,9 @@ impl CopilotManager {
         let clean_key = api_key
             .map(|k| k.trim().to_string())
             .filter(|k| !k.is_empty());
+        let ctx_win = context_window
+            .unwrap_or(DEFAULT_LOCAL_CTX_WINDOW)
+            .clamp(4_096, 1_000_000);
 
         let effective_key = {
             let mut list = self
@@ -1470,6 +1502,7 @@ impl CopilotManager {
             if let Some(existing) = list.iter_mut().find(|e| e.name.eq_ignore_ascii_case(&name)) {
                 existing.name = name.clone();
                 existing.url = url.clone();
+                existing.context_window = ctx_win;
                 if clean_key.is_some() {
                     existing.api_key = clean_key.clone();
                 }
@@ -1483,6 +1516,7 @@ impl CopilotManager {
                     name: name.clone(),
                     url: url.clone(),
                     api_key: clean_key.clone(),
+                    context_window: ctx_win,
                 });
                 if persist {
                     persist_local_llms(&self.core.local_llms_file, &list)?;
@@ -1495,6 +1529,7 @@ impl CopilotManager {
             let mut cfg = self.core.config.write().unwrap_or_else(|e| e.into_inner());
             cfg.provider = CopilotProvider::Local;
             cfg.local_endpoint = url;
+            cfg.local_context_window = ctx_win;
             cfg.active_local_name = Some(name);
         }
         {
@@ -1523,6 +1558,7 @@ impl CopilotManager {
             let mut cfg = self.core.config.write().unwrap_or_else(|e| e.into_inner());
             cfg.provider = CopilotProvider::Local;
             cfg.local_endpoint = found.url;
+            cfg.local_context_window = found.context_window;
             cfg.active_local_name = Some(found.name);
         }
         {
@@ -1592,6 +1628,7 @@ impl CopilotManager {
                 url: trimmed,
                 message: "URL must start with http:// or https://".into(),
                 models: Vec::new(),
+                context_window: None,
             };
         }
         let key = api_key
@@ -1627,13 +1664,20 @@ impl CopilotManager {
                 Ok(resp) if resp.ok() => {
                     let body = resp.text().unwrap_or_default();
                     let res_bytes = body.len();
-                    let models = parse_models_response(&body);
+                    let (models, detected_ctx) = parse_models_response_with_ctx(&body);
                     tracing::info!(
-                        "copilot probe <- {probe_url} (req_bytes=0, res_bytes={res_bytes}, models={})",
-                        models.len()
+                        "copilot probe <- {probe_url} (req_bytes=0, res_bytes={res_bytes}, models={}, ctx={:?})",
+                        models.len(),
+                        detected_ctx
                     );
                     let msg = if models.is_empty() {
                         format!("Connected to {probe_url} (0 models returned)")
+                    } else if let Some(ctx) = detected_ctx {
+                        format!(
+                            "Connected — {} model(s) available (detected {}K ctx)",
+                            models.len(),
+                            ctx / 1024
+                        )
                     } else {
                         format!("Connected — {} model(s) available", models.len())
                     };
@@ -1642,6 +1686,7 @@ impl CopilotManager {
                         url: trimmed,
                         message: msg,
                         models,
+                        context_window: detected_ctx,
                     };
                 }
                 Ok(resp) => {
@@ -1665,6 +1710,7 @@ impl CopilotManager {
             url: trimmed,
             message: last_err,
             models: Vec::new(),
+            context_window: None,
         }
     }
 
@@ -2130,18 +2176,29 @@ fn persist_local_llms(path: &Path, list: &[StoredLocalLlm]) -> Result<(), String
     Ok(())
 }
 
-/// Parse model IDs from OpenAI `/v1/models` (`{ data: [{ id }] }`) or Ollama `/api/tags` (`{ models: [{ name }] }`).
-pub fn parse_models_response(body: &str) -> Vec<String> {
+/// Parse model IDs and optional context window length from OpenAI `/v1/models`
+/// (`{ data: [{ id, max_model_len / context_length / meta.n_ctx_train }] }`) or Ollama `/api/tags`.
+pub fn parse_models_response_with_ctx(body: &str) -> (Vec<String>, Option<u64>) {
     let Ok(val) = serde_json::from_str::<Value>(body) else {
-        return Vec::new();
+        return (Vec::new(), None);
     };
     let mut out = Vec::new();
+    let mut detected_ctx: Option<u64> = None;
     if let Some(arr) = val.get("data").and_then(Value::as_array) {
         for item in arr {
             if let Some(id) = item.get("id").and_then(Value::as_str)
                 && !id.trim().is_empty()
             {
                 out.push(id.trim().to_string());
+            }
+            if detected_ctx.is_none() {
+                detected_ctx = item
+                    .get("max_model_len")
+                    .or_else(|| item.get("context_length"))
+                    .or_else(|| item.get("n_ctx"))
+                    .or_else(|| item.get("meta").and_then(|m| m.get("n_ctx_train")))
+                    .and_then(Value::as_u64)
+                    .filter(|&n| n >= 2_048);
             }
         }
     }
@@ -2161,7 +2218,12 @@ pub fn parse_models_response(body: &str) -> Vec<String> {
     }
     out.sort();
     out.dedup();
-    out
+    (out, detected_ctx)
+}
+
+#[cfg(test)]
+pub fn parse_models_response(body: &str) -> Vec<String> {
+    parse_models_response_with_ctx(body).0
 }
 
 fn resolve_api_key_from_env(provider: CopilotProvider) -> Option<String> {
@@ -2497,11 +2559,13 @@ mod tests {
 
     #[test]
     fn parses_openai_and_ollama_model_listings() {
-        let openai_json = r#"{"object":"list","data":[{"id":"qwen3:30b"},{"id":"llama3.3:70b"},{"id":"qwen3:30b"}]}"#;
+        let openai_json = r#"{"object":"list","data":[{"id":"qwen3:30b","max_model_len":65536},{"id":"llama3.3:70b"},{"id":"qwen3:30b"}]}"#;
+        let (models, ctx) = parse_models_response_with_ctx(openai_json);
         assert_eq!(
-            parse_models_response(openai_json),
+            models,
             vec!["llama3.3:70b".to_string(), "qwen3:30b".to_string()]
         );
+        assert_eq!(ctx, Some(65_536));
 
         let ollama_json = r#"{"models":[{"name":"deepseek-r1:32b"},{"name":"gemma3:27b"}]}"#;
         assert_eq!(
@@ -2534,6 +2598,7 @@ mod tests {
                 "Unsloth".into(),
                 "http://127.0.0.1:8888/v1".into(),
                 Some("secret-key".into()),
+                Some(65_536),
                 true,
             )
             .unwrap();

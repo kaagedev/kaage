@@ -901,6 +901,7 @@ impl eframe::App for KaageApp {
                                 url: _,
                                 message,
                                 models,
+                                context_window,
                             } => {
                                 for g in &mut self.wm.groups {
                                     for t in &mut g.tabs {
@@ -909,6 +910,7 @@ impl eframe::App for KaageApp {
                                                 ok,
                                                 message.clone(),
                                                 models.clone(),
+                                                context_window,
                                             );
                                         }
                                     }

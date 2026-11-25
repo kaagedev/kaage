@@ -1105,10 +1105,45 @@ fn escape_html_text(s: &str) -> String {
 }
 
 /// Convert LLM Markdown output into XSS-safe HTML for the Kaage Copilot DOM overlay.
-/// Handles fenced code blocks (including unclosed blocks while streaming), headings,
-/// tables, bullet/numbered lists, blockquotes, horizontal rules, and inline formatting.
+/// Handles `<think>...</think>` reasoning blocks (including streaming unclosed blocks),
+/// fenced code blocks, headings, tables, bullet/numbered lists, blockquotes, horizontal rules,
+/// and inline formatting.
 #[allow(dead_code)]
 pub fn markdown_to_html(md: &str) -> String {
+    let mut out = String::with_capacity(md.len() + 64);
+    let mut rest = md;
+    while let Some(start) = rest.find("<think>") {
+        let before = &rest[..start];
+        if !before.trim().is_empty() {
+            out.push_str(&render_markdown_blocks(before));
+        }
+        let after = &rest[start + "<think>".len()..];
+        if let Some(end) = after.find("</think>") {
+            let think_body = after[..end].trim();
+            if !think_body.is_empty() {
+                out.push_str(&format!(
+                    "<details class='kc-think'><summary>Reasoning</summary><div class='kc-think-body'>{}</div></details>",
+                    render_markdown_blocks(think_body)
+                ));
+            }
+            rest = &after[end + "</think>".len()..];
+        } else {
+            let think_body = after.trim();
+            out.push_str(&format!(
+                "<details class='kc-think' open><summary>Thinking…</summary><div class='kc-think-body'>{}</div></details>",
+                render_markdown_blocks(think_body)
+            ));
+            rest = "";
+            break;
+        }
+    }
+    if !rest.trim().is_empty() {
+        out.push_str(&render_markdown_blocks(rest));
+    }
+    out
+}
+
+fn render_markdown_blocks(md: &str) -> String {
     let lines: Vec<&str> = md.lines().collect();
     let mut out = String::with_capacity(md.len() + 64);
     let mut i = 0;
@@ -1394,5 +1429,19 @@ mod md_tests {
         assert!(html.contains("<li>item <em>one</em></li>"));
         assert!(!html.contains("<script>"));
         assert!(html.contains("&lt;script&gt;"));
+    }
+
+    #[test]
+    fn renders_closed_and_streaming_think_blocks() {
+        let closed = "<think>Check `kaaged.service` first.</think>\n\n**All healthy.**";
+        let html = markdown_to_html(closed);
+        assert!(html.contains("<details class='kc-think'><summary>Reasoning</summary>"));
+        assert!(html.contains("<code class='kc-code'>kaaged.service</code>"));
+        assert!(html.contains("<strong>All healthy.</strong>"));
+
+        let streaming = "<think>Analyzing PSI metrics...";
+        let html2 = markdown_to_html(streaming);
+        assert!(html2.contains("<details class='kc-think' open><summary>Thinking…</summary>"));
+        assert!(html2.contains("Analyzing PSI metrics..."));
     }
 }

@@ -576,6 +576,7 @@ pub struct LocalLlmEndpoint {
     pub name: String,
     pub url: String,
     pub has_key: bool,
+    pub context_window: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -786,6 +787,7 @@ pub enum ClientMsg {
         name: String,
         url: String,
         api_key: Option<String>,
+        context_window: Option<u64>,
         persist: bool,
     },
     DeleteLocalLlm {
@@ -880,6 +882,7 @@ pub enum ServerMsg {
         url: String,
         message: String,
         models: Vec<String>,
+        context_window: Option<u64>,
     },
     CopilotHistory(Vec<CopilotHistoryMessage>),
     DebugLogsSnapshot(Vec<DebugLogEntry>),

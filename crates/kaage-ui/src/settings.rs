@@ -24,6 +24,7 @@ pub struct SettingsWindow {
     pub local_name_input: String,
     pub local_url_input: String,
     pub local_key_input: String,
+    pub local_ctx_window: u64,
     pub local_persist: bool,
     pub local_form_initialized: bool,
     pub local_testing: bool,
@@ -49,6 +50,7 @@ impl SettingsWindow {
             local_name_input: String::new(),
             local_url_input: String::new(),
             local_key_input: String::new(),
+            local_ctx_window: 32_768,
             local_persist: true,
             local_form_initialized: false,
             local_testing: false,
@@ -63,11 +65,20 @@ impl SettingsWindow {
         }
     }
 
-    pub fn on_local_llm_test_result(&mut self, ok: bool, message: String, models: Vec<String>) {
+    pub fn on_local_llm_test_result(
+        &mut self,
+        ok: bool,
+        message: String,
+        models: Vec<String>,
+        context_window: Option<u64>,
+    ) {
         self.local_testing = false;
         self.local_test_result = Some((ok, message));
         if ok {
             self.local_discovered_models = models;
+            if let Some(ctx) = context_window {
+                self.local_ctx_window = ctx;
+            }
         }
     }
 
@@ -398,6 +409,28 @@ impl SettingsWindow {
                                 .desired_width(340.0),
                         );
                         ui.end_row();
+
+                        ui.label(RichText::new("Context:").strong().color(p.text));
+                        ui.horizontal_wrapped(|ui| {
+                            for (label, val) in [
+                                ("16K", 16_384u64),
+                                ("32K", 32_768),
+                                ("64K", 65_536),
+                                ("128K", 131_072),
+                            ] {
+                                if be_toggle_button(ui, label, self.local_ctx_window == val).clicked()
+                                {
+                                    self.local_ctx_window = val;
+                                }
+                            }
+                            ui.label(
+                                RichText::new(format!("({} tok)", self.local_ctx_window))
+                                    .monospace()
+                                    .size(10.0)
+                                    .color(p.text_muted),
+                            );
+                        });
+                        ui.end_row();
                     });
 
                 ui.add_space(4.0);
@@ -444,6 +477,7 @@ impl SettingsWindow {
                             name: self.local_name_input.trim().to_string(),
                             url: self.local_url_input.trim().to_string(),
                             api_key: key,
+                            context_window: Some(self.local_ctx_window),
                             persist: self.local_persist,
                         });
                         self.local_key_input.clear();
@@ -501,6 +535,7 @@ impl SettingsWindow {
                                             name: self.local_name_input.trim().to_string(),
                                             url: self.local_url_input.trim().to_string(),
                                             api_key: Some(self.local_key_input.trim().to_string()),
+                                            context_window: Some(self.local_ctx_window),
                                             persist: local_persist,
                                         });
                                     } else {
@@ -564,6 +599,12 @@ impl SettingsWindow {
                                     .size(10.5)
                                     .color(p.text_muted),
                             );
+                            ui.label(
+                                RichText::new(format!("{}K ctx", ep.context_window / 1024))
+                                    .monospace()
+                                    .size(10.0)
+                                    .color(p.status_sky),
+                            );
                             if ep.has_key {
                                 ui.label(
                                     RichText::new("● Key set")
@@ -577,6 +618,7 @@ impl SettingsWindow {
                             {
                                 self.local_name_input = ep.name.clone();
                                 self.local_url_input = ep.url.clone();
+                                self.local_ctx_window = ep.context_window;
                                 self.local_key_input.clear();
                                 send_msg(ClientMsg::SelectLocalLlm {
                                     name: ep.name.clone(),
@@ -585,6 +627,7 @@ impl SettingsWindow {
                             if be_button(ui, "Edit").clicked() {
                                 self.local_name_input = ep.name.clone();
                                 self.local_url_input = ep.url.clone();
+                                self.local_ctx_window = ep.context_window;
                                 self.local_key_input.clear();
                             }
                             if be_button(ui, "Test").clicked() && !self.local_testing {

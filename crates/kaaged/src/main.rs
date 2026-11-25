@@ -860,8 +860,15 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
                 name,
                 url,
                 api_key,
+                context_window,
                 persist,
-            } => match state.copilot.upsert_local_llm(name.clone(), url, api_key, persist) {
+            } => match state.copilot.upsert_local_llm(
+                name.clone(),
+                url,
+                api_key,
+                context_window,
+                persist,
+            ) {
                 Ok(st) => {
                     let _ = out_tx.send(ServerMsg::ActionFeedback {
                         target: name,
