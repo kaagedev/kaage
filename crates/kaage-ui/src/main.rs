@@ -28,9 +28,9 @@ use file_tracker::TrackerWindow;
 use help::HelpWindow;
 use inspectors::{InspectorSpawnRequest, ScopeFilter, StateFilter};
 use kaage_proto::{
-    AppDataSnapshot, ClientMsg, ContainerInfo, CopilotStatus, DashboardSnapshot, DebugLogEntry,
-    DebugLogLevel, FileOp, HostMetrics, NixosInfo, ServerMsg, SystemdUnitInfo, SystemdUnitStatus,
-    UnitAction, VitalsTick,
+    AppDataSnapshot, ClientMsg, ContainerInfo, CopilotHistoryMessage, CopilotStatus,
+    DashboardSnapshot, DebugLogEntry, DebugLogLevel, FileOp, HostMetrics, NixosInfo, ServerMsg,
+    SystemdUnitInfo, SystemdUnitStatus, UnitAction, VitalsTick,
 };
 use std::collections::VecDeque;
 use palette::{CommandPalette, PaletteAction};
@@ -127,6 +127,7 @@ struct KaageApp {
     dashboard: Option<DashboardSnapshot>,
     appdata: Option<AppDataSnapshot>,
     copilot_status: Option<CopilotStatus>,
+    copilot_history: Vec<CopilotHistoryMessage>,
     debug_logs: VecDeque<DebugLogEntry>,
     cpu_history: Vec<f32>,
     mem_history: Vec<f32>,
@@ -288,6 +289,7 @@ impl KaageApp {
             dashboard: None,
             appdata: None,
             copilot_status: None,
+            copilot_history: Vec::new(),
             debug_logs: VecDeque::with_capacity(2000),
             cpu_history: Vec::with_capacity(MAX_HISTORY_SAMPLES),
             mem_history: Vec::with_capacity(MAX_HISTORY_SAMPLES),
@@ -337,6 +339,7 @@ impl KaageApp {
         self.send_client_msg(ClientMsg::RefreshDashboard);
         self.send_client_msg(ClientMsg::GetAppDataState);
         self.send_client_msg(ClientMsg::GetCopilotStatus);
+        self.send_client_msg(ClientMsg::GetCopilotHistory);
         self.send_client_msg(ClientMsg::GetDebugLogs);
         let startup = std::mem::take(&mut self.pending_startup_msgs);
         for msg in startup {
@@ -596,15 +599,20 @@ impl KaageApp {
 
     fn open_copilot(&mut self) {
         self.send_client_msg(ClientMsg::GetCopilotStatus);
+        self.send_client_msg(ClientMsg::GetCopilotHistory);
         if self
             .wm
             .focus_matching_tab(|k| matches!(k, PaneKind::Copilot(_)))
         {
             return;
         }
+        let mut win = CopilotWindow::new();
+        if !self.copilot_history.is_empty() {
+            win.load_history(&self.copilot_history);
+        }
         self.wm.open_window(
             "Copilot (AI)".into(),
-            PaneKind::Copilot(Box::new(CopilotWindow::new())),
+            PaneKind::Copilot(Box::new(win)),
             self.stage_origin(32.0, 24.0),
             Vec2::new(620.0, 520.0),
         );
@@ -911,6 +919,16 @@ impl eframe::App for KaageApp {
                                     expires_at: now + 5.0,
                                     undo_msg: None,
                                 });
+                            }
+                            ServerMsg::CopilotHistory(hist) => {
+                                self.copilot_history = hist;
+                                for g in &mut self.wm.groups {
+                                    for t in &mut g.tabs {
+                                        if let PaneKind::Copilot(c) = &mut t.kind {
+                                            c.load_history(&self.copilot_history);
+                                        }
+                                    }
+                                }
                             }
                             ServerMsg::DebugLogsSnapshot(entries) => {
                                 self.debug_logs.clear();

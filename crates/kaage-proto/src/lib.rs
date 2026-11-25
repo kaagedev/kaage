@@ -579,6 +579,12 @@ pub struct LocalLlmEndpoint {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CopilotHistoryMessage {
+    pub role: String,
+    pub text: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CopilotStatus {
     pub provider: CopilotProvider,
     pub model: String,
@@ -792,6 +798,8 @@ pub enum ClientMsg {
         action_id: String,
         approved: bool,
     },
+    GetCopilotHistory,
+    ClearCopilotHistory,
     GetDebugLogs,
     ClearDebugLogs,
     EmitDebugLog {
@@ -862,6 +870,7 @@ pub enum ServerMsg {
         message: String,
         models: Vec<String>,
     },
+    CopilotHistory(Vec<CopilotHistoryMessage>),
     DebugLogsSnapshot(Vec<DebugLogEntry>),
     DebugLogEntry(DebugLogEntry),
 }

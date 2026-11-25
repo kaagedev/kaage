@@ -917,6 +917,35 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
                     },
                 });
             }
+            ClientMsg::GetCopilotHistory => {
+                let copilot = Arc::clone(&state.copilot);
+                let tx = out_tx.clone();
+                tokio::task::spawn_blocking(move || {
+                    let hist = copilot.history();
+                    let _ = tx.send(ServerMsg::CopilotHistory(hist));
+                });
+            }
+            ClientMsg::ClearCopilotHistory => {
+                let copilot = Arc::clone(&state.copilot);
+                let tx = out_tx.clone();
+                tokio::task::spawn_blocking(move || match copilot.clear_history() {
+                    Ok(()) => {
+                        let _ = tx.send(ServerMsg::CopilotHistory(Vec::new()));
+                        let _ = tx.send(ServerMsg::ActionFeedback {
+                            target: "Kaage Copilot".into(),
+                            ok: true,
+                            message: "Chat history cleared".into(),
+                        });
+                    }
+                    Err(err) => {
+                        let _ = tx.send(ServerMsg::ActionFeedback {
+                            target: "Kaage Copilot".into(),
+                            ok: false,
+                            message: err,
+                        });
+                    }
+                });
+            }
             ClientMsg::GetDebugLogs => {
                 let _ = out_tx.send(ServerMsg::DebugLogsSnapshot(state.debug_log.snapshot()));
             }

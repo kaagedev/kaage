@@ -1,14 +1,14 @@
 use kaage_proto::{
-    CopilotCard, CopilotProvider, CopilotStatus, LocalLlmEndpoint, NixosInfo, ServerMsg,
-    TrustMode, VitalsQuery, VitalsWindow,
+    CopilotCard, CopilotHistoryMessage, CopilotProvider, CopilotStatus, LocalLlmEndpoint,
+    NixosInfo, ServerMsg, TrustMode, VitalsQuery, VitalsWindow,
 };
 use pi_durable::ai::event_stream::AssistantMessageEventStream;
 use pi_durable::ai::http::{Request as PiHttpRequest, send as pi_http_send};
 use pi_durable::ai::models::{Models, ModelsError};
 use pi_durable::ai::registry::{Auth, Providers};
 use pi_durable::ai::types::{
-    AssistantMessage, AssistantMessageEvent, DeferredHandle, Model, SimpleStreamOptions,
-    TranscriptContext, UserContent,
+    AssistantBlock, AssistantMessage, AssistantMessageEvent, DeferredHandle, Message, Model,
+    SimpleStreamOptions, TranscriptContext, UserBlock, UserContent,
 };
 use pi_durable::cancel::CancelToken;
 use pi_durable::harness::agent::{AgentChange, Change};
@@ -1072,6 +1072,73 @@ impl CopilotManager {
 
     pub fn status(&self) -> CopilotStatus {
         self.core.status()
+    }
+
+    /// Read the persisted durable chat history from `pi-durable`'s SQLite ledger.
+    pub fn history(&self) -> Vec<CopilotHistoryMessage> {
+        let cancel = CancelToken::new();
+        let Ok(root) = self.harness.root(RootOptions::default(), &cancel) else {
+            return Vec::new();
+        };
+        let Ok(ctx) = root.context(None, &cancel) else {
+            return Vec::new();
+        };
+        let mut out = Vec::new();
+        for msg in ctx.messages {
+            match msg {
+                Message::User(u) => {
+                    let text = match &u.content {
+                        UserContent::Text(s) => s.clone(),
+                        UserContent::Blocks(blocks) => blocks
+                            .iter()
+                            .filter_map(|b| match b {
+                                UserBlock::Text(t) => Some(t.text.as_str()),
+                                _ => None,
+                            })
+                            .collect::<Vec<_>>()
+                            .join("\n"),
+                    };
+                    if !text.trim().is_empty() {
+                        out.push(CopilotHistoryMessage {
+                            role: "user".into(),
+                            text,
+                        });
+                    }
+                }
+                Message::Assistant(a) => {
+                    let text = a
+                        .content
+                        .iter()
+                        .filter_map(|b| match b {
+                            AssistantBlock::Text(t) => Some(t.text.as_str()),
+                            _ => None,
+                        })
+                        .collect::<Vec<_>>()
+                        .join("");
+                    if !text.trim().is_empty() {
+                        out.push(CopilotHistoryMessage {
+                            role: "assistant".into(),
+                            text,
+                        });
+                    }
+                }
+                _ => {}
+            }
+        }
+        out
+    }
+
+    /// Reset the durable root conversation so the user starts a fresh chat session.
+    pub fn clear_history(&self) -> Result<(), String> {
+        let cancel = CancelToken::new();
+        let root = self
+            .harness
+            .root(RootOptions::default(), &cancel)
+            .map_err(|e| format!("Failed to open durable conversation: {e}"))?;
+        root.reset(None, &cancel)
+            .map_err(|e| format!("Failed to reset conversation: {e}"))?;
+        let _ = root.wait_for_idle(&cancel);
+        Ok(())
     }
 
     pub fn upsert_local_llm(

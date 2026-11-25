@@ -4,7 +4,9 @@ use crate::theme::be_button;
 use egui::{Rect, Ui};
 #[cfg(not(target_arch = "wasm32"))]
 use egui::{CornerRadius, RichText, ScrollArea, Stroke};
-use kaage_proto::{ClientMsg, CopilotCard, CopilotProvider, CopilotStatus, TrustMode};
+use kaage_proto::{
+    ClientMsg, CopilotCard, CopilotHistoryMessage, CopilotProvider, CopilotStatus, TrustMode,
+};
 
 #[derive(Debug, Clone)]
 pub enum CopilotCrossAction {
@@ -92,6 +94,25 @@ impl CopilotWindow {
 
     pub fn on_card(&mut self, card: CopilotCard) {
         self.items.push(CopilotItem::Card(card));
+        self.dom_dirty = true;
+    }
+
+    pub fn load_history(&mut self, history: &[CopilotHistoryMessage]) {
+        if self.active_request_id.is_some() {
+            return;
+        }
+        self.items.clear();
+        for (idx, msg) in history.iter().enumerate() {
+            if msg.role == "user" {
+                self.items.push(CopilotItem::User(msg.text.clone()));
+            } else {
+                self.items.push(CopilotItem::Assistant {
+                    request_id: idx as u64,
+                    text: msg.text.clone(),
+                    done: true,
+                });
+            }
+        }
         self.dom_dirty = true;
     }
 
@@ -209,7 +230,9 @@ impl CopilotWindow {
                 }
                 "clear" => {
                     self.items.clear();
-                    return Vec::new();
+                    return vec![CopilotCrossAction::SendClientMsg(
+                        ClientMsg::ClearCopilotHistory,
+                    )];
                 }
                 _ => {
                     self.items.push(CopilotItem::SystemNotice(
@@ -752,8 +775,8 @@ mod wasm_overlay {
                     CopilotItem::Assistant { text, done, .. } => {
                         let cursor = if *done { "" } else { "<span class='kc-cursor'>▌</span>" };
                         html.push_str(&format!(
-                            "<div class='kc-msg kc-assistant'><div class='kc-role'>COPILOT</div><div class='kc-body'>{}{cursor}</div></div>",
-                            esc(text)
+                            "<div class='kc-msg kc-assistant'><div class='kc-role'>COPILOT</div><div class='kc-md'>{}{cursor}</div></div>",
+                            super::markdown_to_html(text)
                         ));
                     }
                     CopilotItem::ToolStatus {
@@ -969,5 +992,313 @@ mod wasm_overlay {
 
     fn js_str(s: &str) -> String {
         s.replace('\\', "\\\\").replace('\'', "\\'")
+    }
+}
+
+fn escape_html_text(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for ch in s.chars() {
+        match ch {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            '\'' => out.push_str("&#39;"),
+            _ => out.push(ch),
+        }
+    }
+    out
+}
+
+/// Convert LLM Markdown output into XSS-safe HTML for the Kaage Copilot DOM overlay.
+/// Handles fenced code blocks (including unclosed blocks while streaming), headings,
+/// tables, bullet/numbered lists, blockquotes, horizontal rules, and inline formatting.
+#[allow(dead_code)]
+pub fn markdown_to_html(md: &str) -> String {
+    let lines: Vec<&str> = md.lines().collect();
+    let mut out = String::with_capacity(md.len() + 64);
+    let mut i = 0;
+
+    while i < lines.len() {
+        let line = lines[i];
+        let trimmed = line.trim();
+
+        if trimmed.is_empty() {
+            i += 1;
+            continue;
+        }
+
+        // Fenced code block ```lang
+        if let Some(rest) = trimmed.strip_prefix("```") {
+            let lang = rest.trim();
+            i += 1;
+            let mut code = String::new();
+            while i < lines.len() {
+                if lines[i].trim().starts_with("```") {
+                    i += 1;
+                    break;
+                }
+                if !code.is_empty() {
+                    code.push('\n');
+                }
+                code.push_str(lines[i]);
+                i += 1;
+            }
+            out.push_str("<div class='kc-codeblock'>");
+            if !lang.is_empty() {
+                out.push_str(&format!(
+                    "<div class='kc-code-lang'>{}</div>",
+                    escape_html_text(lang)
+                ));
+            }
+            out.push_str(&format!(
+                "<pre class='kc-pre'><code>{}</code></pre></div>",
+                escape_html_text(&code)
+            ));
+            continue;
+        }
+
+        // Horizontal rule
+        if trimmed.len() >= 3
+            && (trimmed.chars().all(|c| c == '-' || c == ' ') && trimmed.contains("---")
+                || trimmed.chars().all(|c| c == '*' || c == ' ') && trimmed.contains("***")
+                || trimmed.chars().all(|c| c == '_' || c == ' ') && trimmed.contains("___"))
+        {
+            out.push_str("<hr class='kc-hr' />");
+            i += 1;
+            continue;
+        }
+
+        // ATX Headings (# .. ######)
+        let hashes = trimmed.bytes().take_while(|&b| b == b'#').count();
+        if (1..=6).contains(&hashes) && trimmed.as_bytes().get(hashes) == Some(&b' ') {
+            let heading = trimmed[hashes + 1..].trim();
+            out.push_str(&format!(
+                "<h{hashes} class='kc-h{hashes}'>{}</h{hashes}>",
+                render_inline_md(heading)
+            ));
+            i += 1;
+            continue;
+        }
+
+        // Blockquote (> ...)
+        if trimmed.starts_with('>') {
+            let mut quote_lines = Vec::new();
+            while i < lines.len() && lines[i].trim().starts_with('>') {
+                let q = lines[i].trim().trim_start_matches('>').trim_start();
+                quote_lines.push(render_inline_md(q));
+                i += 1;
+            }
+            out.push_str(&format!(
+                "<blockquote class='kc-quote'>{}</blockquote>",
+                quote_lines.join("<br />")
+            ));
+            continue;
+        }
+
+        // Markdown table: header row + separator row (| --- | --- |)
+        if trimmed.contains('|')
+            && i + 1 < lines.len()
+            && is_table_separator(lines[i + 1].trim())
+        {
+            let headers = split_table_row(trimmed);
+            i += 2;
+            out.push_str("<table class='kc-table'><thead><tr>");
+            for h in headers {
+                out.push_str(&format!("<th>{}</th>", render_inline_md(h)));
+            }
+            out.push_str("</tr></thead><tbody>");
+            while i < lines.len() && lines[i].trim().contains('|') && !lines[i].trim().is_empty() {
+                let cells = split_table_row(lines[i].trim());
+                out.push_str("<tr>");
+                for c in cells {
+                    out.push_str(&format!("<td>{}</td>", render_inline_md(c)));
+                }
+                out.push_str("</tr>");
+                i += 1;
+            }
+            out.push_str("</tbody></table>");
+            continue;
+        }
+
+        // Unordered list (- , * , + )
+        if is_ul_item(trimmed) {
+            out.push_str("<ul class='kc-list'>");
+            while i < lines.len() && is_ul_item(lines[i].trim()) {
+                let item = lines[i].trim()[2..].trim();
+                out.push_str(&format!("<li>{}</li>", render_inline_md(item)));
+                i += 1;
+            }
+            out.push_str("</ul>");
+            continue;
+        }
+
+        // Ordered list (1. , 2. )
+        if strip_ol_prefix(trimmed).is_some() {
+            out.push_str("<ol class='kc-list'>");
+            while i < lines.len() {
+                if let Some(item) = strip_ol_prefix(lines[i].trim()) {
+                    out.push_str(&format!("<li>{}</li>", render_inline_md(item)));
+                    i += 1;
+                } else {
+                    break;
+                }
+            }
+            out.push_str("</ol>");
+            continue;
+        }
+
+        // Paragraph (accumulate consecutive plain lines)
+        let mut para = Vec::new();
+        while i < lines.len() {
+            let t = lines[i].trim();
+            let h = t.bytes().take_while(|&b| b == b'#').count();
+            if t.is_empty()
+                || t.starts_with("```")
+                || t.starts_with('>')
+                || is_ul_item(t)
+                || strip_ol_prefix(t).is_some()
+                || ((1..=6).contains(&h) && t.as_bytes().get(h) == Some(&b' '))
+                || (t.contains('|')
+                    && i + 1 < lines.len()
+                    && is_table_separator(lines[i + 1].trim()))
+            {
+                break;
+            }
+            para.push(render_inline_md(lines[i]));
+            i += 1;
+        }
+        if !para.is_empty() {
+            out.push_str(&format!("<p>{}</p>", para.join("<br />")));
+        }
+    }
+
+    out
+}
+
+fn is_ul_item(trimmed: &str) -> bool {
+    trimmed.starts_with("- ") || trimmed.starts_with("* ") || trimmed.starts_with("+ ")
+}
+
+fn strip_ol_prefix(trimmed: &str) -> Option<&str> {
+    let digits = trimmed.bytes().take_while(|b| b.is_ascii_digit()).count();
+    if digits > 0 && trimmed[digits..].starts_with(". ") {
+        Some(trimmed[digits + 2..].trim())
+    } else {
+        None
+    }
+}
+
+fn is_table_separator(trimmed: &str) -> bool {
+    trimmed.contains('|')
+        && trimmed.contains('-')
+        && trimmed
+            .chars()
+            .all(|c| matches!(c, '|' | '-' | ':' | ' ' | '\t'))
+}
+
+fn split_table_row(trimmed: &str) -> Vec<&str> {
+    let inner = trimmed
+        .strip_prefix('|')
+        .unwrap_or(trimmed)
+        .strip_suffix('|')
+        .unwrap_or(trimmed);
+    inner.split('|').map(str::trim).collect()
+}
+
+fn render_inline_md(input: &str) -> String {
+    let mut out = String::with_capacity(input.len() + 16);
+    let mut rest = input;
+    while let Some(start) = rest.find('`') {
+        out.push_str(&render_inline_non_code(&rest[..start]));
+        let after = &rest[start + 1..];
+        if let Some(end) = after.find('`') {
+            out.push_str("<code class='kc-code'>");
+            out.push_str(&escape_html_text(&after[..end]));
+            out.push_str("</code>");
+            rest = &after[end + 1..];
+        } else {
+            out.push('`');
+            rest = after;
+        }
+    }
+    out.push_str(&render_inline_non_code(rest));
+    out
+}
+
+fn render_inline_non_code(input: &str) -> String {
+    let mut out = String::with_capacity(input.len() + 16);
+    let mut rest = input;
+    while let Some(lb) = rest.find('[') {
+        let after_lb = &rest[lb + 1..];
+        if let Some(rb) = after_lb.find("](") {
+            let label = &after_lb[..rb];
+            let after_lp = &after_lb[rb + 2..];
+            if let Some(rp) = after_lp.find(')') {
+                let url = after_lp[..rp].trim();
+                if url.starts_with("http://") || url.starts_with("https://") {
+                    out.push_str(&format_emphasis(&escape_html_text(&rest[..lb])));
+                    out.push_str(&format!(
+                        "<a class='kc-link' href='{}' target='_blank' rel='noopener noreferrer'>{}</a>",
+                        escape_html_text(url),
+                        format_emphasis(&escape_html_text(label))
+                    ));
+                    rest = &after_lp[rp + 1..];
+                    continue;
+                }
+            }
+        }
+        out.push_str(&format_emphasis(&escape_html_text(&rest[..lb + 1])));
+        rest = after_lb;
+    }
+    out.push_str(&format_emphasis(&escape_html_text(rest)));
+    out
+}
+
+fn format_emphasis(escaped: &str) -> String {
+    let s = replace_delimited(escaped, "**", "<strong>", "</strong>");
+    let s = replace_delimited(&s, "~~", "<del>", "</del>");
+    replace_delimited(&s, "*", "<em>", "</em>")
+}
+
+fn replace_delimited(input: &str, delim: &str, open: &str, close: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    let mut rest = input;
+    while let Some(start) = rest.find(delim) {
+        let after = &rest[start + delim.len()..];
+        if let Some(end) = after.find(delim)
+            && end > 0
+        {
+            out.push_str(&rest[..start]);
+            out.push_str(open);
+            out.push_str(&after[..end]);
+            out.push_str(close);
+            rest = &after[end + delim.len()..];
+            continue;
+        }
+        out.push_str(&rest[..start + delim.len()]);
+        rest = after;
+    }
+    out.push_str(rest);
+    out
+}
+
+#[cfg(test)]
+mod md_tests {
+    use super::*;
+
+    #[test]
+    fn renders_markdown_headings_code_lists_tables_and_escapes_html() {
+        let md = "## Status\n\nService **kaaged** is `active` ([docs](https://example.com)).\n\n```nix\nservices.kaage.enable = true;\n```\n\n| Unit | State |\n| --- | --- |\n| kaaged | running |\n\n- item *one*\n- <script>alert(1)</script>";
+        let html = markdown_to_html(md);
+        assert!(html.contains("<h2 class='kc-h2'>Status</h2>"));
+        assert!(html.contains("<strong>kaaged</strong>"));
+        assert!(html.contains("<code class='kc-code'>active</code>"));
+        assert!(html.contains("<a class='kc-link' href='https://example.com'"));
+        assert!(html.contains("<div class='kc-code-lang'>nix</div>"));
+        assert!(html.contains("<table class='kc-table'>"));
+        assert!(html.contains("<li>item <em>one</em></li>"));
+        assert!(!html.contains("<script>"));
+        assert!(html.contains("&lt;script&gt;"));
     }
 }
