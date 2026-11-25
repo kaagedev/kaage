@@ -2,6 +2,24 @@ use kaage_proto::{
     CopilotCard, CopilotProvider, CopilotStatus, NixosInfo, ServerMsg, TrustMode, VitalsQuery,
     VitalsWindow,
 };
+use pi_durable::ai::event_stream::AssistantMessageEventStream;
+use pi_durable::ai::models::{Models, ModelsError};
+use pi_durable::ai::registry::{Auth, Providers};
+use pi_durable::ai::types::{
+    AssistantMessage, AssistantMessageEvent, DeferredHandle, Model, SimpleStreamOptions,
+    TranscriptContext, UserContent,
+};
+use pi_durable::cancel::CancelToken;
+use pi_durable::harness::agent::{AgentChange, Change};
+use pi_durable::harness::harness::Harness;
+use pi_durable::harness::registry::Registry;
+use pi_durable::harness::submissions::{SubmissionDraft, WhenBusy};
+use pi_durable::harness::types::{
+    Extension, HarnessOptions, ModelRef, RootOptions, ToolExecutionResult, ToolRegistration,
+};
+use pi_durable::storage::memory::MemoryStorage;
+use pi_durable::storage::sqlite::SqliteStorage;
+use pi_durable::types::Storage;
 use rusqlite::{Connection, params};
 use serde_json::{Value, json};
 use std::{
@@ -15,17 +33,13 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 use tokio::{
-    io::{AsyncBufReadExt, BufReader},
     process::Command,
     sync::{mpsc, oneshot},
-    task::JoinHandle,
 };
 
-const MAX_TURNS: usize = 8;
-const GEMINI_ENDPOINT: &str =
-    "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions";
-const OPENAI_ENDPOINT: &str = "https://api.openai.com/v1/chat/completions";
-const ANTHROPIC_ENDPOINT: &str = "https://api.anthropic.com/v1/messages";
+const GEMINI_BASE_URL: &str = "https://generativelanguage.googleapis.com/v1beta/openai";
+const OPENAI_BASE_URL: &str = "https://api.openai.com/v1";
+const ANTHROPIC_BASE_URL: &str = "https://api.anthropic.com";
 const DEFAULT_LOCAL_ENDPOINT: &str = "http://127.0.0.1:11434/v1/chat/completions";
 
 pub struct CopilotConfig {
@@ -124,91 +138,27 @@ impl MemoryStore {
     }
 }
 
-pub struct CopilotManager {
+#[derive(Clone)]
+struct ActiveTurn {
+    request_id: u64,
+    out_tx: mpsc::UnboundedSender<ServerMsg>,
+    vitals: Arc<crate::vitals::VitalsCollector>,
+    tokio_handle: tokio::runtime::Handle,
+}
+
+/// Shared state accessible by both `CopilotManager`, `KaageModels`, and `pi-durable` tool handlers.
+struct CopilotCore {
     config: RwLock<CopilotConfig>,
     runtime_keys: RwLock<SavedApiKeys>,
     keys_file: PathBuf,
     local_hostname: String,
     memory: Option<Arc<MemoryStore>>,
     pending_confirms: Mutex<HashMap<String, oneshot::Sender<bool>>>,
-    active_tasks: Mutex<HashMap<u64, JoinHandle<()>>>,
     next_action_seq: AtomicU64,
+    active_turn: Mutex<Option<ActiveTurn>>,
 }
 
-impl CopilotManager {
-    pub fn new(local_hostname: String) -> Arc<Self> {
-        let provider = match std::env::var("KAAGE_COPILOT_PROVIDER")
-            .unwrap_or_default()
-            .to_ascii_lowercase()
-            .as_str()
-        {
-            "openai" => CopilotProvider::OpenAi,
-            "claude" | "anthropic" => CopilotProvider::Claude,
-            "local" | "ollama" => CopilotProvider::Local,
-            _ => CopilotProvider::Gemini,
-        };
-        let model = std::env::var("KAAGE_COPILOT_MODEL")
-            .ok()
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty())
-            .unwrap_or_else(|| provider.default_model().to_string());
-        let trust_mode = match std::env::var("KAAGE_COPILOT_TRUST_MODE")
-            .unwrap_or_default()
-            .to_ascii_lowercase()
-            .as_str()
-        {
-            "monitored" | "readonly" | "read-only" => TrustMode::Monitored,
-            _ => TrustMode::Managed,
-        };
-        let flake_path = std::env::var("KAAGE_COPILOT_FLAKE_PATH")
-            .ok()
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty())
-            .unwrap_or_else(|| crate::appdata::expand_user_path("~/dotfiles").display().to_string());
-        let local_endpoint = std::env::var("KAAGE_COPILOT_LOCAL_ENDPOINT")
-            .ok()
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty())
-            .unwrap_or_else(|| DEFAULT_LOCAL_ENDPOINT.to_string());
-
-        let kaage_dir = crate::appdata::kaage_app_dir();
-        let db_path = kaage_dir.join("memory.db");
-        let keys_file = kaage_dir.join("copilot_keys.json");
-        let saved_keys: SavedApiKeys = fs::read_to_string(&keys_file)
-            .ok()
-            .and_then(|raw| serde_json::from_str(&raw).ok())
-            .unwrap_or_default();
-
-        let memory = match MemoryStore::open(&db_path) {
-            Ok(store) => {
-                tracing::info!("Copilot FTS5 memory initialized at {}", db_path.display());
-                Some(Arc::new(store))
-            }
-            Err(err) => {
-                tracing::warn!("Copilot FTS5 memory disabled: {err}");
-                None
-            }
-        };
-
-        Arc::new(Self {
-            config: RwLock::new(CopilotConfig {
-                provider,
-                model,
-                trust_mode,
-                target_node: local_hostname.clone(),
-                flake_path,
-                local_endpoint,
-            }),
-            runtime_keys: RwLock::new(saved_keys),
-            keys_file,
-            local_hostname,
-            memory,
-            pending_confirms: Mutex::new(HashMap::new()),
-            active_tasks: Mutex::new(HashMap::new()),
-            next_action_seq: AtomicU64::new(1),
-        })
-    }
-
+impl CopilotCore {
     fn effective_api_key(&self, provider: CopilotProvider) -> Option<String> {
         let rt = self.runtime_keys.read().unwrap_or_else(|e| e.into_inner());
         let from_rt = match provider {
@@ -223,40 +173,7 @@ impl CopilotManager {
         from_rt.or_else(|| resolve_api_key_from_env(provider))
     }
 
-    pub fn set_api_key(
-        &self,
-        provider: CopilotProvider,
-        api_key: String,
-        persist: bool,
-    ) -> Result<CopilotStatus, String> {
-        let trimmed = api_key.trim().to_string();
-        let val = if trimmed.is_empty() { None } else { Some(trimmed) };
-        {
-            let mut rt = self.runtime_keys.write().unwrap_or_else(|e| e.into_inner());
-            match provider {
-                CopilotProvider::Gemini => rt.gemini = val.clone(),
-                CopilotProvider::OpenAi => rt.openai = val.clone(),
-                CopilotProvider::Claude => rt.claude = val.clone(),
-                CopilotProvider::Local => rt.local = val.clone(),
-            }
-            if persist {
-                if let Some(parent) = self.keys_file.parent() {
-                    let _ = fs::create_dir_all(parent);
-                }
-                let json = serde_json::to_string_pretty(&*rt).map_err(|e| e.to_string())?;
-                fs::write(&self.keys_file, json)
-                    .map_err(|e| format!("Failed to write {}: {e}", self.keys_file.display()))?;
-                #[cfg(unix)]
-                {
-                    use std::os::unix::fs::PermissionsExt;
-                    let _ = fs::set_permissions(&self.keys_file, fs::Permissions::from_mode(0o600));
-                }
-            }
-        }
-        Ok(self.status())
-    }
-
-    pub fn status(&self) -> CopilotStatus {
+    fn status(&self) -> CopilotStatus {
         let cfg = self.config.read().unwrap_or_else(|e| e.into_inner());
         let has_gemini = self.effective_api_key(CopilotProvider::Gemini).is_some();
         let has_openai = self.effective_api_key(CopilotProvider::OpenAi).is_some();
@@ -281,304 +198,44 @@ impl CopilotManager {
         }
     }
 
-    pub fn update_config(
-        &self,
-        provider: Option<CopilotProvider>,
-        model: Option<String>,
-        trust_mode: Option<TrustMode>,
-        target_node: Option<String>,
-        local_endpoint: Option<String>,
-    ) -> CopilotStatus {
-        {
-            let mut cfg = self.config.write().unwrap_or_else(|e| e.into_inner());
-            if let Some(p) = provider {
-                let provider_changed = cfg.provider != p;
-                cfg.provider = p;
-                if provider_changed && model.is_none() {
-                    cfg.model = p.default_model().to_string();
-                }
-            }
-            if let Some(m) = model
-                && !m.trim().is_empty()
-            {
-                cfg.model = m.trim().to_string();
-            }
-            if let Some(t) = trust_mode {
-                cfg.trust_mode = t;
-            }
-            if let Some(n) = target_node
-                && !n.trim().is_empty()
-            {
-                cfg.target_node = n.trim().to_string();
-            }
-            if let Some(ep) = local_endpoint
-                && !ep.trim().is_empty()
-            {
-                cfg.local_endpoint = ep.trim().to_string();
-            }
-        }
-        self.status()
-    }
-
-    pub fn resolve_confirmation(&self, action_id: &str, approved: bool) -> bool {
-        let tx = self
-            .pending_confirms
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .remove(action_id);
-        if let Some(tx) = tx {
-            let _ = tx.send(approved);
-            true
-        } else {
-            false
-        }
-    }
-
-    pub fn cancel_request(&self, request_id: u64) {
-        if let Some(handle) = self
-            .active_tasks
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .remove(&request_id)
-        {
-            handle.abort();
-        }
-    }
-
-    pub fn spawn_ask(
-        self: &Arc<Self>,
-        request_id: u64,
-        prompt: String,
-        nixos: NixosInfo,
-        vitals: Arc<crate::vitals::VitalsCollector>,
-        out_tx: mpsc::UnboundedSender<ServerMsg>,
-    ) {
-        let mgr = Arc::clone(self);
-        let mgr_cleanup = Arc::clone(self);
-        let handle = tokio::spawn(async move {
-            mgr.run_conversation(request_id, prompt, nixos, vitals, out_tx.clone())
-                .await;
-            mgr_cleanup
-                .active_tasks
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .remove(&request_id);
-        });
-        self.active_tasks
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .insert(request_id, handle);
-    }
-
-    async fn run_conversation(
+    async fn request_approval(
         &self,
         request_id: u64,
-        prompt: String,
-        nixos: NixosInfo,
-        vitals: Arc<crate::vitals::VitalsCollector>,
-        out_tx: mpsc::UnboundedSender<ServerMsg>,
-    ) {
-        let status = self.status();
-        let api_key = self.effective_api_key(status.provider);
-        if status.provider != CopilotProvider::Local && api_key.is_none() {
-            let env_name = status.provider.env_var_name();
-            let _ = out_tx.send(ServerMsg::CopilotChunk {
-                request_id,
-                delta: format!(
-                    "Copilot is missing `{env_name}` for `{}`. Add the key in the setup banner above or in `kaage-settings → Copilot (AI)`.",
-                    status.provider.label()
-                ),
-                done: true,
-            });
-            return;
-        }
-        let api_key = api_key.unwrap_or_default();
+        target_node: &str,
+        summary: String,
+        preview: String,
+        rollback_cmd: String,
+        out_tx: &mpsc::UnboundedSender<ServerMsg>,
+    ) -> bool {
+        let seq = self.next_action_seq.fetch_add(1, Ordering::Relaxed);
+        let action_id = format!("act-{request_id}-{seq}");
+        let (tx, rx) = oneshot::channel();
+        self.pending_confirms
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(action_id.clone(), tx);
 
-        let mut recalled_block = String::new();
-        if let Some(ref mem) = self.memory {
-            let hits = mem.search(&prompt, 5);
-            if !hits.is_empty() {
-                recalled_block.push_str("\nRecalled host memories:\n");
-                for (cat, txt) in &hits {
-                    recalled_block.push_str(&format!("- [{cat}] {txt}\n"));
-                    let _ = out_tx.send(ServerMsg::CopilotCard {
-                        request_id,
-                        card: CopilotCard::MemoryNote {
-                            saved: false,
-                            category: cat.clone(),
-                            summary: txt.clone(),
-                        },
-                    });
-                }
-            }
-        }
-
-        let system_prompt = format!(
-            "You are Kaage Copilot, an expert Linux & NixOS operations assistant embedded inside kaage on host `{}`.\n\
-             Active OS: {} (NixOS: {}, generation: {:?}, current-system: {:?}).\n\
-             Configured flake path: {}.\n\
-             Target node: {} · Trust mode: {}.\n\
-             Use your diagnostic tools to inspect real host state before answering. Be concise, accurate, and cite exact unit names, metrics, and file paths.{recalled_block}",
-            self.local_hostname,
-            nixos.pretty_name,
-            nixos.is_nixos,
-            nixos.generation,
-            nixos.current_system,
-            status.flake_path,
-            status.target_node,
-            status.trust_mode.as_str(),
-        );
-
-        let mut messages = vec![
-            json!({ "role": "system", "content": system_prompt }),
-            json!({ "role": "user", "content": prompt }),
-        ];
-
-        let tools = tool_schemas();
-
-        for _turn in 0..MAX_TURNS {
-            let turn_future = match status.provider {
-                CopilotProvider::Claude => {
-                    stream_anthropic_messages(
-                        &api_key,
-                        &status.model,
-                        &system_prompt,
-                        &messages,
-                        &tools,
-                        request_id,
-                        &out_tx,
-                    )
-                    .await
-                }
-                CopilotProvider::Gemini => {
-                    stream_openai_compat(
-                        GEMINI_ENDPOINT,
-                        &api_key,
-                        &status.model,
-                        &messages,
-                        &tools,
-                        request_id,
-                        &out_tx,
-                    )
-                    .await
-                }
-                CopilotProvider::OpenAi => {
-                    stream_openai_compat(
-                        OPENAI_ENDPOINT,
-                        &api_key,
-                        &status.model,
-                        &messages,
-                        &tools,
-                        request_id,
-                        &out_tx,
-                    )
-                    .await
-                }
-                CopilotProvider::Local => {
-                    stream_openai_compat(
-                        &status.local_endpoint,
-                        &api_key,
-                        &status.model,
-                        &messages,
-                        &tools,
-                        request_id,
-                        &out_tx,
-                    )
-                    .await
-                }
-            };
-            match turn_future {
-                Ok(turn_res) => {
-                    if turn_res.tool_calls.is_empty() {
-                        let _ = out_tx.send(ServerMsg::CopilotChunk {
-                            request_id,
-                            delta: String::new(),
-                            done: true,
-                        });
-                        return;
-                    }
-
-                    // Append assistant message with tool_calls
-                    let tc_json: Vec<Value> = turn_res
-                        .tool_calls
-                        .iter()
-                        .map(|tc| {
-                            json!({
-                                "id": tc.id,
-                                "type": "function",
-                                "function": {
-                                    "name": tc.name,
-                                    "arguments": tc.arguments
-                                }
-                            })
-                        })
-                        .collect();
-                    messages.push(json!({
-                        "role": "assistant",
-                        "content": if turn_res.content.is_empty() { Value::Null } else { Value::String(turn_res.content) },
-                        "tool_calls": tc_json
-                    }));
-
-                    for tc in turn_res.tool_calls {
-                        let args: Value =
-                            serde_json::from_str(&tc.arguments).unwrap_or_else(|_| json!({}));
-                        let target_node = args
-                            .get("node")
-                            .and_then(Value::as_str)
-                            .filter(|s| !s.trim().is_empty())
-                            .map(str::to_string)
-                            .unwrap_or_else(|| status.target_node.clone());
-
-                        let _ = out_tx.send(ServerMsg::CopilotToolStatus {
-                            request_id,
-                            tool_name: tc.name.clone(),
-                            target_node: target_node.clone(),
-                            state: "running".into(),
-                        });
-
-                        let result = self
-                            .execute_tool(
-                                request_id,
-                                &tc.name,
-                                &args,
-                                &target_node,
-                                status.trust_mode,
-                                &status.flake_path,
-                                &vitals,
-                                &out_tx,
-                            )
-                            .await;
-
-                        let _ = out_tx.send(ServerMsg::CopilotToolStatus {
-                            request_id,
-                            tool_name: tc.name.clone(),
-                            target_node,
-                            state: "done".into(),
-                        });
-
-                        messages.push(json!({
-                            "role": "tool",
-                            "tool_call_id": tc.id,
-                            "content": result
-                        }));
-                    }
-                }
-                Err(err) => {
-                    let _ = out_tx.send(ServerMsg::CopilotChunk {
-                        request_id,
-                        delta: format!("\n[Copilot API error: {err}]"),
-                        done: true,
-                    });
-                    return;
-                }
-            }
-        }
-
-        let _ = out_tx.send(ServerMsg::CopilotChunk {
+        let _ = out_tx.send(ServerMsg::CopilotConfirmRequest {
             request_id,
-            delta: "\n[Reached max tool turns (8)]".into(),
-            done: true,
+            gate: CopilotCard::ConfirmGate {
+                action_id: action_id.clone(),
+                target_node: target_node.to_string(),
+                summary,
+                preview,
+                rollback_cmd,
+            },
         });
+
+        match tokio::time::timeout(std::time::Duration::from_secs(300), rx).await {
+            Ok(Ok(approved)) => approved,
+            _ => {
+                self.pending_confirms
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .remove(&action_id);
+                false
+            }
+        }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -599,7 +256,11 @@ impl CopilotManager {
             // --- Tier 1: Read-Only Tools (Auto-Approved) ---
             "get_system_vitals" => {
                 if is_remote {
-                    return run_remote_shell(target_node, "uptime && free -m && cat /proc/pressure/cpu /proc/pressure/memory 2>/dev/null || true").await;
+                    return run_remote_shell(
+                        target_node,
+                        "uptime && free -m && cat /proc/pressure/cpu /proc/pressure/memory 2>/dev/null || true",
+                    )
+                    .await;
                 }
                 let snap = vitals.query_snapshot(&VitalsQuery {
                     window: VitalsWindow::Min5,
@@ -628,7 +289,9 @@ impl CopilotManager {
                         end_ts,
                         metric_label: format!(
                             "CPU {:.1}% · RAM {}/{} MiB",
-                            snap.latest.cpu_percent, snap.latest.mem_used_mb, snap.latest.mem_total_mb
+                            snap.latest.cpu_percent,
+                            snap.latest.mem_used_mb,
+                            snap.latest.mem_total_mb
                         ),
                         points,
                         top_consumers: top_consumers.clone(),
@@ -665,7 +328,8 @@ impl CopilotManager {
                     run_local_shell(&cmd).await
                 };
                 let redacted = redact_secrets(&raw);
-                let (meta_part, logs_part) = redacted.split_once("---LOGS---").unwrap_or((&redacted, ""));
+                let (meta_part, logs_part) =
+                    redacted.split_once("---LOGS---").unwrap_or((&redacted, ""));
                 let mut active = "unknown".to_string();
                 let mut sub = "unknown".to_string();
                 let mut summary_bits = Vec::new();
@@ -765,7 +429,10 @@ impl CopilotManager {
             }
 
             "save_host_memory" => {
-                let category = args.get("category").and_then(Value::as_str).unwrap_or("system");
+                let category = args
+                    .get("category")
+                    .and_then(Value::as_str)
+                    .unwrap_or("system");
                 let content = args.get("content").and_then(Value::as_str).unwrap_or("");
                 if let Some(ref mem) = self.memory {
                     match mem.save(category, content) {
@@ -800,11 +467,14 @@ impl CopilotManager {
             // --- Tier 2: Guarded Mutation Tools (Requires Managed Mode + User Approval) ---
             "control_unit_or_container" => {
                 if trust_mode == TrustMode::Monitored {
-                    return "Blocked: Copilot is in Monitored (read-only) mode. Switch to Managed mode with `/mode manage` to perform mutations.".into();
+                    return "Blocked: Kaage Copilot is in Monitored (read-only) mode. Switch to Managed mode with `/mode manage` to perform mutations.".into();
                 }
                 let kind = args.get("kind").and_then(Value::as_str).unwrap_or("unit");
                 let target = args.get("target").and_then(Value::as_str).unwrap_or("");
-                let action = args.get("action").and_then(Value::as_str).unwrap_or("restart");
+                let action = args
+                    .get("action")
+                    .and_then(Value::as_str)
+                    .unwrap_or("restart");
                 let scope = args.get("scope").and_then(Value::as_str).unwrap_or("system");
                 let user_flag = if scope == "user" { "--user " } else { "" };
 
@@ -842,7 +512,7 @@ impl CopilotManager {
 
             "propose_nix_edit" => {
                 if trust_mode == TrustMode::Monitored {
-                    return "Blocked: Copilot is in Monitored (read-only) mode.".into();
+                    return "Blocked: Kaage Copilot is in Monitored (read-only) mode.".into();
                 }
                 let path_str = args.get("file_path").and_then(Value::as_str).unwrap_or("");
                 let new_content = args.get("new_content").and_then(Value::as_str).unwrap_or("");
@@ -852,7 +522,10 @@ impl CopilotManager {
                     .unwrap_or("Update NixOS configuration");
                 let expanded = crate::appdata::expand_user_path(path_str);
                 if !is_path_in_allowed_roots(&expanded, flake_path) {
-                    return format!("Blocked: {} is outside allowed config roots.", expanded.display());
+                    return format!(
+                        "Blocked: {} is outside allowed config roots.",
+                        expanded.display()
+                    );
                 }
                 let old_content = fs::read_to_string(&expanded).unwrap_or_default();
                 let diff = simple_unified_diff(&old_content, new_content, path_str);
@@ -881,14 +554,17 @@ impl CopilotManager {
                     return "Edit rejected by user.".into();
                 }
                 match fs::write(&expanded, new_content) {
-                    Ok(()) => format!("Successfully wrote {}. Run `nixos-rebuild switch` to activate.", expanded.display()),
+                    Ok(()) => format!(
+                        "Successfully wrote {}. Run `nixos-rebuild switch` to activate.",
+                        expanded.display()
+                    ),
                     Err(e) => format!("Failed to write {}: {e}", expanded.display()),
                 }
             }
 
             "run_diagnostic_command" => {
                 if trust_mode == TrustMode::Monitored {
-                    return "Blocked: Copilot is in Monitored (read-only) mode.".into();
+                    return "Blocked: Kaage Copilot is in Monitored (read-only) mode.".into();
                 }
                 let cmd = args.get("command").and_then(Value::as_str).unwrap_or("");
                 let summary = args
@@ -919,397 +595,812 @@ impl CopilotManager {
             _ => format!("Unknown tool: {name}"),
         }
     }
+}
 
-    async fn request_approval(
+fn provider_slug(provider: CopilotProvider) -> &'static str {
+    match provider {
+        CopilotProvider::Gemini => "kaage-gemini",
+        CopilotProvider::OpenAi => "kaage-openai",
+        CopilotProvider::Claude => "kaage-claude",
+        CopilotProvider::Local => "kaage-local",
+    }
+}
+
+fn provider_from_slug(slug: &str) -> Option<CopilotProvider> {
+    match slug {
+        "kaage-gemini" => Some(CopilotProvider::Gemini),
+        "kaage-openai" => Some(CopilotProvider::OpenAi),
+        "kaage-claude" => Some(CopilotProvider::Claude),
+        "kaage-local" => Some(CopilotProvider::Local),
+        _ => None,
+    }
+}
+
+fn normalize_openai_base_url(endpoint: &str) -> String {
+    let trimmed = endpoint.trim().trim_end_matches('/');
+    trimmed
+        .strip_suffix("/chat/completions")
+        .unwrap_or(trimmed)
+        .to_string()
+}
+
+/// Bridges `pi-durable`'s `Providers` with Kaage's dynamic runtime keys, custom model IDs,
+/// and live WebSocket `ServerMsg::CopilotChunk` streaming.
+struct KaageModels {
+    providers: Providers,
+    core: Arc<CopilotCore>,
+}
+
+impl KaageModels {
+    fn new(core: Arc<CopilotCore>) -> Self {
+        let mut providers = Providers::builtin();
+        let auth_core = Arc::clone(&core);
+        providers.set_auth(Arc::new(move |model: &Model| {
+            let mut auth = Auth::default();
+            if let Some(p) = provider_from_slug(&model.provider) {
+                auth.api_key = auth_core.effective_api_key(p);
+                if p == CopilotProvider::Local {
+                    if auth.api_key.is_none() {
+                        auth.api_key = Some("kaage-local".to_string());
+                    }
+                    let ep = auth_core
+                        .config
+                        .read()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .local_endpoint
+                        .clone();
+                    auth.base_url = Some(normalize_openai_base_url(&ep));
+                }
+            }
+            Ok(auth)
+        }));
+        Self { providers, core }
+    }
+}
+
+impl Models for KaageModels {
+    fn get_model(&self, provider: &str, id: &str) -> Option<Model> {
+        match provider {
+            "kaage-gemini" => {
+                let mut m = Model::new(provider, id, "openai-completions", 1_000_000, 16_384, false);
+                m.base_url = GEMINI_BASE_URL.to_string();
+                Some(m)
+            }
+            "kaage-openai" => {
+                let mut m = Model::new(provider, id, "openai-completions", 200_000, 16_384, false);
+                m.base_url = OPENAI_BASE_URL.to_string();
+                Some(m)
+            }
+            "kaage-claude" => {
+                let mut m = Model::new(provider, id, "anthropic-messages", 200_000, 16_384, false);
+                m.base_url = ANTHROPIC_BASE_URL.to_string();
+                Some(m)
+            }
+            "kaage-local" => {
+                let ep = self
+                    .core
+                    .config
+                    .read()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .local_endpoint
+                    .clone();
+                let mut m = Model::new(provider, id, "openai-completions", 128_000, 8_192, false);
+                m.base_url = normalize_openai_base_url(&ep);
+                Some(m)
+            }
+            _ => self.providers.get_model(provider, id),
+        }
+    }
+
+    fn stream_simple(
         &self,
-        request_id: u64,
-        target_node: &str,
-        summary: String,
-        preview: String,
-        rollback_cmd: String,
-        out_tx: &mpsc::UnboundedSender<ServerMsg>,
-    ) -> bool {
-        let seq = self.next_action_seq.fetch_add(1, Ordering::Relaxed);
-        let action_id = format!("act-{request_id}-{seq}");
-        let (tx, rx) = oneshot::channel();
-        self.pending_confirms
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .insert(action_id.clone(), tx);
+        model: &Model,
+        context: TranscriptContext,
+        options: SimpleStreamOptions,
+    ) -> AssistantMessageEventStream {
+        let inner = self.providers.stream_simple(model, context, options);
+        let outer = AssistantMessageEventStream::new();
+        let outer_tx = outer.clone();
+        let core = Arc::clone(&self.core);
 
-        let _ = out_tx.send(ServerMsg::CopilotConfirmRequest {
-            request_id,
-            gate: CopilotCard::ConfirmGate {
-                action_id: action_id.clone(),
-                target_node: target_node.to_string(),
-                summary,
-                preview,
-                rollback_cmd,
-            },
-        });
-
-        match tokio::time::timeout(std::time::Duration::from_secs(300), rx).await {
-            Ok(Ok(approved)) => approved,
-            _ => {
-                self.pending_confirms
+        std::thread::spawn(move || {
+            while let Some(event) = inner.next_event() {
+                if let Some(turn) = core
+                    .active_turn
                     .lock()
                     .unwrap_or_else(|e| e.into_inner())
-                    .remove(&action_id);
-                false
-            }
-        }
-    }
-}
-
-struct ToolCallAcc {
-    id: String,
-    name: String,
-    arguments: String,
-}
-
-struct TurnResult {
-    content: String,
-    tool_calls: Vec<ToolCallAcc>,
-}
-
-async fn stream_openai_compat(
-    endpoint: &str,
-    api_key: &str,
-    model: &str,
-    messages: &[Value],
-    tools: &Value,
-    request_id: u64,
-    out_tx: &mpsc::UnboundedSender<ServerMsg>,
-) -> Result<TurnResult, String> {
-    let payload = json!({
-        "model": model,
-        "messages": messages,
-        "tools": tools,
-        "stream": true
-    });
-    let body = serde_json::to_string(&payload).map_err(|e| e.to_string())?;
-
-    let mut child = Command::new("curl")
-        .args([
-            "-sSN",
-            "--no-buffer",
-            "-X",
-            "POST",
-            endpoint,
-            "-H",
-            "Content-Type: application/json",
-            "-H",
-            &format!("Authorization: Bearer {api_key}"),
-            "--data-binary",
-            "@-",
-        ])
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-        .map_err(|e| format!("Failed to spawn curl: {e}"))?;
-
-    if let Some(mut stdin) = child.stdin.take() {
-        use tokio::io::AsyncWriteExt;
-        stdin
-            .write_all(body.as_bytes())
-            .await
-            .map_err(|e| format!("Write request body failed: {e}"))?;
-    }
-
-    let stdout = child.stdout.take().ok_or("Missing curl stdout")?;
-    let mut lines = BufReader::new(stdout).lines();
-
-    let mut full_content = String::new();
-    let mut tool_map: HashMap<usize, ToolCallAcc> = HashMap::new();
-    let mut raw_error = String::new();
-
-    while let Ok(Some(line)) = lines.next_line().await {
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-        if let Some(data) = trimmed.strip_prefix("data:") {
-            let data = data.trim();
-            if data == "[DONE]" {
-                break;
-            }
-            if let Ok(val) = serde_json::from_str::<Value>(data) {
-                if let Some(err) = val.get("error") {
-                    return Err(err.to_string());
-                }
-                if let Some(delta) = val
-                    .get("choices")
-                    .and_then(|c| c.get(0))
-                    .and_then(|c| c.get("delta"))
+                    .clone()
                 {
-                    if let Some(text) = delta.get("content").and_then(Value::as_str)
-                        && !text.is_empty()
-                    {
-                        full_content.push_str(text);
-                        let _ = out_tx.send(ServerMsg::CopilotChunk {
-                            request_id,
-                            delta: text.to_string(),
-                            done: false,
-                        });
-                    }
-                    if let Some(tcs) = delta.get("tool_calls").and_then(Value::as_array) {
-                        for tc in tcs {
-                            let idx = tc.get("index").and_then(Value::as_u64).unwrap_or(0) as usize;
-                            let entry = tool_map.entry(idx).or_insert_with(|| ToolCallAcc {
-                                id: String::new(),
-                                name: String::new(),
-                                arguments: String::new(),
+                    match &event {
+                        AssistantMessageEvent::TextDelta { delta, .. } if !delta.is_empty() => {
+                            let _ = turn.out_tx.send(ServerMsg::CopilotChunk {
+                                request_id: turn.request_id,
+                                delta: delta.clone(),
+                                done: false,
                             });
-                            if let Some(id) = tc.get("id").and_then(Value::as_str) {
-                                entry.id.push_str(id);
-                            }
-                            if let Some(func) = tc.get("function") {
-                                if let Some(n) = func.get("name").and_then(Value::as_str) {
-                                    entry.name.push_str(n);
-                                }
-                                if let Some(a) = func.get("arguments").and_then(Value::as_str) {
-                                    entry.arguments.push_str(a);
-                                }
-                            }
                         }
-                    }
-                }
-            }
-        } else if raw_error.len() < 1024 {
-            raw_error.push_str(trimmed);
-            raw_error.push(' ');
-        }
-    }
-
-    let _ = child.wait().await;
-
-    if full_content.is_empty() && tool_map.is_empty() && !raw_error.is_empty() {
-        return Err(raw_error.trim().to_string());
-    }
-
-    let mut ordered: Vec<(usize, ToolCallAcc)> = tool_map.into_iter().collect();
-    ordered.sort_by_key(|(idx, _)| *idx);
-    let tool_calls = ordered.into_iter().map(|(_, acc)| acc).collect();
-
-    Ok(TurnResult {
-        content: full_content,
-        tool_calls,
-    })
-}
-
-async fn stream_anthropic_messages(
-    api_key: &str,
-    model: &str,
-    system_prompt: &str,
-    messages: &[Value],
-    openai_tools: &Value,
-    request_id: u64,
-    out_tx: &mpsc::UnboundedSender<ServerMsg>,
-) -> Result<TurnResult, String> {
-    // Convert OpenAI-style messages (skipping system) and tools to Anthropic Messages schema
-    let mut anth_msgs = Vec::new();
-    for m in messages {
-        let role = m.get("role").and_then(Value::as_str).unwrap_or("");
-        match role {
-            "user" => {
-                anth_msgs.push(json!({
-                    "role": "user",
-                    "content": m.get("content").and_then(Value::as_str).unwrap_or("")
-                }));
-            }
-            "assistant" => {
-                let mut blocks = Vec::new();
-                if let Some(txt) = m.get("content").and_then(Value::as_str)
-                    && !txt.is_empty()
-                {
-                    blocks.push(json!({ "type": "text", "text": txt }));
-                }
-                if let Some(tcs) = m.get("tool_calls").and_then(Value::as_array) {
-                    for tc in tcs {
-                        let id = tc.get("id").and_then(Value::as_str).unwrap_or("tool_1");
-                        let name = tc
-                            .get("function")
-                            .and_then(|f| f.get("name"))
-                            .and_then(Value::as_str)
-                            .unwrap_or("");
-                        let args_str = tc
-                            .get("function")
-                            .and_then(|f| f.get("arguments"))
-                            .and_then(Value::as_str)
-                            .unwrap_or("{}");
-                        let input: Value =
-                            serde_json::from_str(args_str).unwrap_or_else(|_| json!({}));
-                        blocks.push(json!({
-                            "type": "tool_use",
-                            "id": id,
-                            "name": name,
-                            "input": input
-                        }));
-                    }
-                }
-                anth_msgs.push(json!({ "role": "assistant", "content": blocks }));
-            }
-            "tool" => {
-                let id = m
-                    .get("tool_call_id")
-                    .and_then(Value::as_str)
-                    .unwrap_or("tool_1");
-                let content = m.get("content").and_then(Value::as_str).unwrap_or("");
-                anth_msgs.push(json!({
-                    "role": "user",
-                    "content": [{
-                        "type": "tool_result",
-                        "tool_use_id": id,
-                        "content": content
-                    }]
-                }));
-            }
-            _ => {}
-        }
-    }
-
-    let anth_tools: Vec<Value> = openai_tools
-        .as_array()
-        .map(|arr| {
-            arr.iter()
-                .filter_map(|t| t.get("function"))
-                .map(|f| {
-                    json!({
-                        "name": f.get("name").cloned().unwrap_or(json!("")),
-                        "description": f.get("description").cloned().unwrap_or(json!("")),
-                        "input_schema": f.get("parameters").cloned().unwrap_or(json!({"type":"object","properties":{}}))
-                    })
-                })
-                .collect()
-        })
-        .unwrap_or_default();
-
-    let payload = json!({
-        "model": model,
-        "max_tokens": 4096,
-        "system": system_prompt,
-        "messages": anth_msgs,
-        "tools": anth_tools,
-        "stream": true
-    });
-    let body = serde_json::to_string(&payload).map_err(|e| e.to_string())?;
-
-    let mut child = Command::new("curl")
-        .args([
-            "-sSN",
-            "--no-buffer",
-            "-X",
-            "POST",
-            ANTHROPIC_ENDPOINT,
-            "-H",
-            "Content-Type: application/json",
-            "-H",
-            &format!("x-api-key: {api_key}"),
-            "-H",
-            "anthropic-version: 2023-06-01",
-            "--data-binary",
-            "@-",
-        ])
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-        .map_err(|e| format!("Failed to spawn curl: {e}"))?;
-
-    if let Some(mut stdin) = child.stdin.take() {
-        use tokio::io::AsyncWriteExt;
-        stdin
-            .write_all(body.as_bytes())
-            .await
-            .map_err(|e| format!("Write request body failed: {e}"))?;
-    }
-
-    let stdout = child.stdout.take().ok_or("Missing curl stdout")?;
-    let mut lines = BufReader::new(stdout).lines();
-
-    let mut full_content = String::new();
-    let mut tool_map: HashMap<usize, ToolCallAcc> = HashMap::new();
-    let mut raw_error = String::new();
-
-    while let Ok(Some(line)) = lines.next_line().await {
-        let trimmed = line.trim();
-        if trimmed.is_empty() || trimmed.starts_with("event:") {
-            continue;
-        }
-        if let Some(data) = trimmed.strip_prefix("data:") {
-            let data = data.trim();
-            if let Ok(val) = serde_json::from_str::<Value>(data) {
-                let kind = val.get("type").and_then(Value::as_str).unwrap_or("");
-                match kind {
-                    "error" => return Err(val.to_string()),
-                    "content_block_start" => {
-                        let idx = val.get("index").and_then(Value::as_u64).unwrap_or(0) as usize;
-                        if let Some(cb) = val.get("content_block")
-                            && cb.get("type").and_then(Value::as_str) == Some("tool_use")
-                        {
-                            tool_map.insert(
-                                idx,
-                                ToolCallAcc {
-                                    id: cb
-                                        .get("id")
-                                        .and_then(Value::as_str)
-                                        .unwrap_or("tool_1")
-                                        .to_string(),
-                                    name: cb
-                                        .get("name")
-                                        .and_then(Value::as_str)
-                                        .unwrap_or("")
-                                        .to_string(),
-                                    arguments: String::new(),
-                                },
-                            );
-                        }
-                    }
-                    "content_block_delta" => {
-                        let idx = val.get("index").and_then(Value::as_u64).unwrap_or(0) as usize;
-                        if let Some(delta) = val.get("delta") {
-                            let dtype = delta.get("type").and_then(Value::as_str).unwrap_or("");
-                            if dtype == "text_delta"
-                                && let Some(text) = delta.get("text").and_then(Value::as_str)
-                                && !text.is_empty()
+                        AssistantMessageEvent::Error { error, .. } => {
+                            if let Some(ref msg) = error.error_message
+                                && !msg.is_empty()
                             {
-                                full_content.push_str(text);
-                                let _ = out_tx.send(ServerMsg::CopilotChunk {
-                                    request_id,
-                                    delta: text.to_string(),
+                                let _ = turn.out_tx.send(ServerMsg::CopilotChunk {
+                                    request_id: turn.request_id,
+                                    delta: format!("\n[Kaage Copilot error: {msg}]"),
                                     done: false,
                                 });
-                            } else if dtype == "input_json_delta"
-                                && let Some(part) =
-                                    delta.get("partial_json").and_then(Value::as_str)
-                                && let Some(acc) = tool_map.get_mut(&idx)
-                            {
-                                acc.arguments.push_str(part);
                             }
                         }
+                        _ => {}
                     }
-                    _ => {}
+                }
+                outer_tx.push(event);
+            }
+            outer_tx.end(inner.result());
+        });
+
+        outer
+    }
+
+    fn fetch_deferred(
+        &self,
+        model: &Model,
+        handle: &DeferredHandle,
+        signal: &CancelToken,
+    ) -> Result<AssistantMessage, ModelsError> {
+        self.providers.fetch_deferred(model, handle, signal)
+    }
+
+    fn cancel_deferred(
+        &self,
+        model: &Model,
+        handle: &DeferredHandle,
+        signal: &CancelToken,
+    ) -> Result<(), ModelsError> {
+        self.providers.cancel_deferred(model, handle, signal)
+    }
+}
+
+pub struct CopilotManager {
+    core: Arc<CopilotCore>,
+    harness: Arc<Harness>,
+    turn_lock: Arc<tokio::sync::Mutex<()>>,
+    active_cancels: Mutex<HashMap<u64, CancelToken>>,
+}
+
+impl CopilotManager {
+    pub fn new(local_hostname: String) -> Arc<Self> {
+        let provider = match std::env::var("KAAGE_COPILOT_PROVIDER")
+            .unwrap_or_default()
+            .to_ascii_lowercase()
+            .as_str()
+        {
+            "openai" => CopilotProvider::OpenAi,
+            "claude" | "anthropic" => CopilotProvider::Claude,
+            "local" | "ollama" => CopilotProvider::Local,
+            _ => CopilotProvider::Gemini,
+        };
+        let model = std::env::var("KAAGE_COPILOT_MODEL")
+            .ok()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| provider.default_model().to_string());
+        let trust_mode = match std::env::var("KAAGE_COPILOT_TRUST_MODE")
+            .unwrap_or_default()
+            .to_ascii_lowercase()
+            .as_str()
+        {
+            "monitored" | "readonly" | "read-only" => TrustMode::Monitored,
+            _ => TrustMode::Managed,
+        };
+        let flake_path = std::env::var("KAAGE_COPILOT_FLAKE_PATH")
+            .ok()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| {
+                crate::appdata::expand_user_path("~/dotfiles")
+                    .display()
+                    .to_string()
+            });
+        let local_endpoint = std::env::var("KAAGE_COPILOT_LOCAL_ENDPOINT")
+            .ok()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| DEFAULT_LOCAL_ENDPOINT.to_string());
+
+        let kaage_dir = crate::appdata::kaage_app_dir();
+        let db_path = kaage_dir.join("memory.db");
+        let durable_db_path = kaage_dir.join("copilot_durable.db");
+        let keys_file = kaage_dir.join("copilot_keys.json");
+        let saved_keys: SavedApiKeys = fs::read_to_string(&keys_file)
+            .ok()
+            .and_then(|raw| serde_json::from_str(&raw).ok())
+            .unwrap_or_default();
+
+        let memory = match MemoryStore::open(&db_path) {
+            Ok(store) => {
+                tracing::info!(
+                    "Kaage Copilot FTS5 memory initialized at {}",
+                    db_path.display()
+                );
+                Some(Arc::new(store))
+            }
+            Err(err) => {
+                tracing::warn!("Kaage Copilot FTS5 memory disabled: {err}");
+                None
+            }
+        };
+
+        let core = Arc::new(CopilotCore {
+            config: RwLock::new(CopilotConfig {
+                provider,
+                model: model.clone(),
+                trust_mode,
+                target_node: local_hostname.clone(),
+                flake_path,
+                local_endpoint,
+            }),
+            runtime_keys: RwLock::new(saved_keys),
+            keys_file,
+            local_hostname,
+            memory,
+            pending_confirms: Mutex::new(HashMap::new()),
+            next_action_seq: AtomicU64::new(1),
+            active_turn: Mutex::new(None),
+        });
+
+        let storage: Arc<dyn Storage> = match SqliteStorage::open(&durable_db_path, &Default::default())
+        {
+            Ok(sql) => {
+                tracing::info!(
+                    "Kaage Copilot durable SQLite store initialized at {}",
+                    durable_db_path.display()
+                );
+                Arc::new(sql)
+            }
+            Err(err) => {
+                tracing::warn!(
+                    "Kaage Copilot durable SQLite store failed ({err}), falling back to in-memory storage"
+                );
+                Arc::new(MemoryStorage::new())
+            }
+        };
+
+        let registry = Arc::new(Registry::default());
+        registry
+            .install(build_kaage_extension(Arc::clone(&core)))
+            .expect("install kaage-copilot pi-durable extension");
+
+        let harness = Harness::open(
+            storage,
+            HarnessOptions {
+                models: Arc::new(KaageModels::new(Arc::clone(&core))),
+                registry,
+                settings: None,
+                conversation_created: None,
+                now: None,
+                env: None,
+                on_report: Some(Arc::new(|err| {
+                    tracing::warn!("Kaage Copilot durable harness report: {err}");
+                })),
+            },
+        )
+        .expect("open pi-durable harness for Kaage Copilot");
+
+        let init_cancel = CancelToken::new();
+        let _ = harness.root(
+            RootOptions {
+                agent: Some(AgentChange {
+                    model: Change::Set(ModelRef {
+                        provider: provider_slug(provider).to_string(),
+                        model_id: model,
+                    }),
+                    ..Default::default()
+                }),
+                init: None,
+            },
+            &init_cancel,
+        );
+
+        Arc::new(Self {
+            core,
+            harness: Arc::new(harness),
+            turn_lock: Arc::new(tokio::sync::Mutex::new(())),
+            active_cancels: Mutex::new(HashMap::new()),
+        })
+    }
+
+    pub fn set_api_key(
+        &self,
+        provider: CopilotProvider,
+        api_key: String,
+        persist: bool,
+    ) -> Result<CopilotStatus, String> {
+        let trimmed = api_key.trim().to_string();
+        let val = if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed)
+        };
+        {
+            let mut rt = self
+                .core
+                .runtime_keys
+                .write()
+                .unwrap_or_else(|e| e.into_inner());
+            match provider {
+                CopilotProvider::Gemini => rt.gemini = val.clone(),
+                CopilotProvider::OpenAi => rt.openai = val.clone(),
+                CopilotProvider::Claude => rt.claude = val.clone(),
+                CopilotProvider::Local => rt.local = val.clone(),
+            }
+            if persist {
+                if let Some(parent) = self.core.keys_file.parent() {
+                    let _ = fs::create_dir_all(parent);
+                }
+                let json = serde_json::to_string_pretty(&*rt).map_err(|e| e.to_string())?;
+                fs::write(&self.core.keys_file, json).map_err(|e| {
+                    format!("Failed to write {}: {e}", self.core.keys_file.display())
+                })?;
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    let _ = fs::set_permissions(
+                        &self.core.keys_file,
+                        fs::Permissions::from_mode(0o600),
+                    );
                 }
             }
-        } else if raw_error.len() < 1024 {
-            raw_error.push_str(trimmed);
-            raw_error.push(' ');
+        }
+        Ok(self.status())
+    }
+
+    pub fn status(&self) -> CopilotStatus {
+        self.core.status()
+    }
+
+    pub fn update_config(
+        &self,
+        provider: Option<CopilotProvider>,
+        model: Option<String>,
+        trust_mode: Option<TrustMode>,
+        target_node: Option<String>,
+        local_endpoint: Option<String>,
+    ) -> CopilotStatus {
+        {
+            let mut cfg = self.core.config.write().unwrap_or_else(|e| e.into_inner());
+            if let Some(p) = provider {
+                let provider_changed = cfg.provider != p;
+                cfg.provider = p;
+                if provider_changed && model.is_none() {
+                    cfg.model = p.default_model().to_string();
+                }
+            }
+            if let Some(m) = model
+                && !m.trim().is_empty()
+            {
+                cfg.model = m.trim().to_string();
+            }
+            if let Some(t) = trust_mode {
+                cfg.trust_mode = t;
+            }
+            if let Some(n) = target_node
+                && !n.trim().is_empty()
+            {
+                cfg.target_node = n.trim().to_string();
+            }
+            if let Some(ep) = local_endpoint
+                && !ep.trim().is_empty()
+            {
+                cfg.local_endpoint = ep.trim().to_string();
+            }
+        }
+        self.status()
+    }
+
+    pub fn resolve_confirmation(&self, action_id: &str, approved: bool) -> bool {
+        let tx = self
+            .core
+            .pending_confirms
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(action_id);
+        if let Some(tx) = tx {
+            let _ = tx.send(approved);
+            true
+        } else {
+            false
         }
     }
 
-    let _ = child.wait().await;
-    if full_content.is_empty() && tool_map.is_empty() && !raw_error.is_empty() {
-        return Err(raw_error.trim().to_string());
+    pub fn cancel_request(&self, request_id: u64) {
+        if let Some(token) = self
+            .active_cancels
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&request_id)
+        {
+            token.cancel();
+        }
+        let harness = Arc::clone(&self.harness);
+        std::thread::spawn(move || {
+            let c = CancelToken::new();
+            if let Ok(root) = harness.root(RootOptions::default(), &c) {
+                let _ = root.abort(false, &c);
+            }
+        });
     }
-    let mut ordered: Vec<(usize, ToolCallAcc)> = tool_map.into_iter().collect();
-    ordered.sort_by_key(|(idx, _)| *idx);
-    let tool_calls = ordered.into_iter().map(|(_, acc)| acc).collect();
 
-    Ok(TurnResult {
-        content: full_content,
-        tool_calls,
-    })
+    pub fn spawn_ask(
+        self: &Arc<Self>,
+        request_id: u64,
+        prompt: String,
+        nixos: NixosInfo,
+        vitals: Arc<crate::vitals::VitalsCollector>,
+        out_tx: mpsc::UnboundedSender<ServerMsg>,
+    ) {
+        let mgr = Arc::clone(self);
+        let handle = tokio::runtime::Handle::current();
+        tokio::spawn(async move {
+            let _guard = mgr.turn_lock.lock().await;
+            let status = mgr.status();
+            let api_key = mgr.core.effective_api_key(status.provider);
+            if status.provider != CopilotProvider::Local && api_key.is_none() {
+                let env_name = status.provider.env_var_name();
+                let _ = out_tx.send(ServerMsg::CopilotChunk {
+                    request_id,
+                    delta: format!(
+                        "Kaage Copilot is missing `{env_name}` for `{}`. Add the key in the setup banner above or in `kaage-settings → Copilot (AI)`.",
+                        status.provider.label()
+                    ),
+                    done: true,
+                });
+                return;
+            }
+
+            let mut recalled_block = String::new();
+            if let Some(ref mem) = mgr.core.memory {
+                let hits = mem.search(&prompt, 5);
+                if !hits.is_empty() {
+                    recalled_block.push_str("\nRecalled host memories:\n");
+                    for (cat, txt) in &hits {
+                        recalled_block.push_str(&format!("- [{cat}] {txt}\n"));
+                        let _ = out_tx.send(ServerMsg::CopilotCard {
+                            request_id,
+                            card: CopilotCard::MemoryNote {
+                                saved: false,
+                                category: cat.clone(),
+                                summary: txt.clone(),
+                            },
+                        });
+                    }
+                }
+            }
+
+            let system_prompt = format!(
+                "You are Kaage Copilot, an expert Linux & NixOS operations assistant embedded inside kaage on host `{}`.\n\
+                 Active OS: {} (NixOS: {}, generation: {:?}, current-system: {:?}).\n\
+                 Configured flake path: {}.\n\
+                 Target node: {} · Trust mode: {}.\n\
+                 Use your diagnostic tools to inspect real host state before answering. Be concise, accurate, and cite exact unit names, metrics, and file paths.{recalled_block}",
+                mgr.core.local_hostname,
+                nixos.pretty_name,
+                nixos.is_nixos,
+                nixos.generation,
+                nixos.current_system,
+                status.flake_path,
+                status.target_node,
+                status.trust_mode.as_str(),
+            );
+
+            let cancel = CancelToken::new();
+            mgr.active_cancels
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .insert(request_id, cancel.clone());
+
+            *mgr.core
+                .active_turn
+                .lock()
+                .unwrap_or_else(|e| e.into_inner()) = Some(ActiveTurn {
+                request_id,
+                out_tx: out_tx.clone(),
+                vitals,
+                tokio_handle: handle,
+            });
+
+            let harness = Arc::clone(&mgr.harness);
+            let provider = status.provider;
+            let model_id = status.model.clone();
+            let cancel_for_blocking = cancel.clone();
+
+            let res = tokio::task::spawn_blocking(move || -> Result<(), String> {
+                let root = harness
+                    .root(RootOptions::default(), &cancel_for_blocking)
+                    .map_err(|e| format!("Durable root conversation failed: {e}"))?;
+
+                root.configure(
+                    &AgentChange {
+                        model: Change::Set(ModelRef {
+                            provider: provider_slug(provider).to_string(),
+                            model_id,
+                        }),
+                        instructions: Change::Set(system_prompt),
+                        ..Default::default()
+                    },
+                    &cancel_for_blocking,
+                )
+                .map_err(|e| format!("Durable configure failed: {e}"))?;
+
+                root.submit(
+                    SubmissionDraft::Input {
+                        request_id: Some(format!("kaage-{request_id}")),
+                        content: UserContent::Text(prompt),
+                        when_busy: WhenBusy::default(),
+                    },
+                    &cancel_for_blocking,
+                )
+                .map_err(|e| format!("Durable submit failed: {e}"))?;
+
+                root.wait_for_idle(&cancel_for_blocking)
+                    .map_err(|e| format!("{e}"))?;
+                Ok(())
+            })
+            .await;
+
+            *mgr.core
+                .active_turn
+                .lock()
+                .unwrap_or_else(|e| e.into_inner()) = None;
+            mgr.active_cancels
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .remove(&request_id);
+
+            match res {
+                Ok(Ok(())) => {
+                    let _ = out_tx.send(ServerMsg::CopilotChunk {
+                        request_id,
+                        delta: String::new(),
+                        done: true,
+                    });
+                }
+                Ok(Err(err)) => {
+                    let msg = if cancel.is_cancelled() {
+                        "\n[Cancelled]".to_string()
+                    } else {
+                        format!("\n[Kaage Copilot error: {err}]")
+                    };
+                    let _ = out_tx.send(ServerMsg::CopilotChunk {
+                        request_id,
+                        delta: msg,
+                        done: true,
+                    });
+                }
+                Err(join_err) => {
+                    let _ = out_tx.send(ServerMsg::CopilotChunk {
+                        request_id,
+                        delta: format!("\n[Kaage Copilot worker error: {join_err}]"),
+                        done: true,
+                    });
+                }
+            }
+        });
+    }
+}
+
+fn build_kaage_extension(core: Arc<CopilotCore>) -> Extension {
+    let defs: Vec<(&'static str, &'static str, Value)> = vec![
+        (
+            "get_system_vitals",
+            "Read live CPU/RAM/GPU/PSI telemetry and top memory/CPU consumers.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "node": { "type": "string", "description": "Optional Tailnet peer node name" }
+                }
+            }),
+        ),
+        (
+            "inspect_systemd_unit",
+            "Inspect a systemd service state, restarts, RSS memory, and recent error/warning journalctl logs.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "unit": { "type": "string" },
+                    "scope": { "type": "string", "enum": ["system", "user"] },
+                    "node": { "type": "string" }
+                },
+                "required": ["unit"]
+            }),
+        ),
+        (
+            "list_containers",
+            "List Docker/Podman containers and their status/ports.",
+            json!({
+                "type": "object",
+                "properties": { "node": { "type": "string" } }
+            }),
+        ),
+        (
+            "eval_nix_option",
+            "Evaluate a read-only NixOS flake configuration option.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "option_path": { "type": "string" },
+                    "host": { "type": "string" },
+                    "node": { "type": "string" }
+                },
+                "required": ["option_path"]
+            }),
+        ),
+        (
+            "diff_nix_generations",
+            "Diff /run/current-system against recent NixOS profile generations.",
+            json!({
+                "type": "object",
+                "properties": { "node": { "type": "string" } }
+            }),
+        ),
+        (
+            "read_config_file",
+            "Read a .nix or systemd unit file inside allowed config roots.",
+            json!({
+                "type": "object",
+                "properties": { "path": { "type": "string" } },
+                "required": ["path"]
+            }),
+        ),
+        (
+            "save_host_memory",
+            "Persist an important host fact, port mapping, preference, or incident fix into SQLite FTS5 memory.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "category": { "type": "string", "enum": ["system", "service", "preference", "incident"] },
+                    "content": { "type": "string" }
+                },
+                "required": ["category", "content"]
+            }),
+        ),
+        (
+            "search_host_memory",
+            "Search persistent SQLite FTS5 host memories.",
+            json!({
+                "type": "object",
+                "properties": { "query": { "type": "string" } },
+                "required": ["query"]
+            }),
+        ),
+        (
+            "control_unit_or_container",
+            "Start, stop, or restart a systemd unit or container (requires user confirmation).",
+            json!({
+                "type": "object",
+                "properties": {
+                    "kind": { "type": "string", "enum": ["unit", "container"] },
+                    "target": { "type": "string" },
+                    "action": { "type": "string", "enum": ["start", "stop", "restart"] },
+                    "scope": { "type": "string", "enum": ["system", "user"] },
+                    "node": { "type": "string" }
+                },
+                "required": ["kind", "target", "action"]
+            }),
+        ),
+        (
+            "propose_nix_edit",
+            "Propose an edit to a NixOS configuration file with a diff preview (requires user confirmation).",
+            json!({
+                "type": "object",
+                "properties": {
+                    "file_path": { "type": "string" },
+                    "new_content": { "type": "string" },
+                    "summary": { "type": "string" },
+                    "node": { "type": "string" }
+                },
+                "required": ["file_path", "new_content", "summary"]
+            }),
+        ),
+        (
+            "run_diagnostic_command",
+            "Run a bounded administrative shell command on the target node (requires user confirmation).",
+            json!({
+                "type": "object",
+                "properties": {
+                    "command": { "type": "string" },
+                    "summary": { "type": "string" },
+                    "node": { "type": "string" }
+                },
+                "required": ["command", "summary"]
+            }),
+        ),
+    ];
+
+    let tools = defs
+        .into_iter()
+        .map(|(name, desc, params)| {
+            let core_ref = Arc::clone(&core);
+            ToolRegistration {
+                tool: serde_json::from_value(json!({
+                    "name": name,
+                    "description": desc,
+                    "parameters": params
+                }))
+                .expect("valid kaage tool schema"),
+                replay: None,
+                execution_mode: None,
+                output_limits: None,
+                prepare_arguments: None,
+                execute: Arc::new(move |arguments, _api, _cancel| {
+                    let Some(turn) = core_ref
+                        .active_turn
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .clone()
+                    else {
+                        return Ok(ToolExecutionResult {
+                            content: Some(vec![serde_json::from_value(json!({
+                                "type": "text",
+                                "text": "No active Kaage Copilot session."
+                            }))?]),
+                            is_error: Some(true),
+                            ..Default::default()
+                        });
+                    };
+
+                    let status = core_ref.status();
+                    let target_node = arguments
+                        .get("node")
+                        .and_then(Value::as_str)
+                        .filter(|s| !s.trim().is_empty())
+                        .map(str::to_string)
+                        .unwrap_or_else(|| status.target_node.clone());
+
+                    let _ = turn.out_tx.send(ServerMsg::CopilotToolStatus {
+                        request_id: turn.request_id,
+                        tool_name: name.to_string(),
+                        target_node: target_node.clone(),
+                        state: "running".into(),
+                    });
+
+                    let result = turn.tokio_handle.block_on(core_ref.execute_tool(
+                        turn.request_id,
+                        name,
+                        &arguments,
+                        &target_node,
+                        status.trust_mode,
+                        &status.flake_path,
+                        &turn.vitals,
+                        &turn.out_tx,
+                    ));
+
+                    let _ = turn.out_tx.send(ServerMsg::CopilotToolStatus {
+                        request_id: turn.request_id,
+                        tool_name: name.to_string(),
+                        target_node,
+                        state: "done".into(),
+                    });
+
+                    Ok(ToolExecutionResult {
+                        content: Some(vec![serde_json::from_value(json!({
+                            "type": "text",
+                            "text": result
+                        }))?]),
+                        ..Default::default()
+                    })
+                }),
+            }
+        })
+        .collect();
+
+    Extension {
+        name: "kaage-copilot".to_string(),
+        tools,
+        sections: vec![],
+        wraps: vec![],
+        hooks: vec![],
+        tasks: vec![],
+    }
 }
 
 fn resolve_api_key_from_env(provider: CopilotProvider) -> Option<String> {
@@ -1475,171 +1566,11 @@ fn simple_unified_diff(old: &str, new: &str, path: &str) -> String {
     diff
 }
 
-fn tool_schemas() -> Value {
-    json!([
-        {
-            "type": "function",
-            "function": {
-                "name": "get_system_vitals",
-                "description": "Read live CPU/RAM/GPU/PSI telemetry and top memory/CPU consumers.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "node": { "type": "string", "description": "Optional Tailnet peer node name" }
-                    }
-                }
-            }
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "inspect_systemd_unit",
-                "description": "Inspect a systemd service state, restarts, RSS memory, and recent error/warning journalctl logs.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "unit": { "type": "string" },
-                        "scope": { "type": "string", "enum": ["system", "user"] },
-                        "node": { "type": "string" }
-                    },
-                    "required": ["unit"]
-                }
-            }
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "list_containers",
-                "description": "List Docker/Podman containers and their status/ports.",
-                "parameters": {
-                    "type": "object",
-                    "properties": { "node": { "type": "string" } }
-                }
-            }
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "eval_nix_option",
-                "description": "Evaluate a read-only NixOS flake configuration option.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "option_path": { "type": "string" },
-                        "host": { "type": "string" },
-                        "node": { "type": "string" }
-                    },
-                    "required": ["option_path"]
-                }
-            }
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "diff_nix_generations",
-                "description": "Diff /run/current-system against recent NixOS profile generations.",
-                "parameters": {
-                    "type": "object",
-                    "properties": { "node": { "type": "string" } }
-                }
-            }
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "read_config_file",
-                "description": "Read a .nix or systemd unit file inside allowed config roots.",
-                "parameters": {
-                    "type": "object",
-                    "properties": { "path": { "type": "string" } },
-                    "required": ["path"]
-                }
-            }
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "save_host_memory",
-                "description": "Persist an important host fact, port mapping, preference, or incident fix into SQLite FTS5 memory.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "category": { "type": "string", "enum": ["system", "service", "preference", "incident"] },
-                        "content": { "type": "string" }
-                    },
-                    "required": ["category", "content"]
-                }
-            }
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "search_host_memory",
-                "description": "Search persistent SQLite FTS5 host memories.",
-                "parameters": {
-                    "type": "object",
-                    "properties": { "query": { "type": "string" } },
-                    "required": ["query"]
-                }
-            }
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "control_unit_or_container",
-                "description": "Start, stop, or restart a systemd unit or container (requires user confirmation).",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "kind": { "type": "string", "enum": ["unit", "container"] },
-                        "target": { "type": "string" },
-                        "action": { "type": "string", "enum": ["start", "stop", "restart"] },
-                        "scope": { "type": "string", "enum": ["system", "user"] },
-                        "node": { "type": "string" }
-                    },
-                    "required": ["kind", "target", "action"]
-                }
-            }
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "propose_nix_edit",
-                "description": "Propose an edit to a NixOS configuration file with a diff preview (requires user confirmation).",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "file_path": { "type": "string" },
-                        "new_content": { "type": "string" },
-                        "summary": { "type": "string" },
-                        "node": { "type": "string" }
-                    },
-                    "required": ["file_path", "new_content", "summary"]
-                }
-            }
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "run_diagnostic_command",
-                "description": "Run a bounded administrative shell command on the target node (requires user confirmation).",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "command": { "type": "string" },
-                        "summary": { "type": "string" },
-                        "node": { "type": "string" }
-                    },
-                    "required": ["command", "summary"]
-                }
-            }
-        }
-    ])
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use pi_durable::ai::providers::faux::{Faux, FauxOptions, FauxResponse};
+    use pi_durable::ai::types::{AssistantBlock, Message};
 
     #[test]
     fn fts5_memory_save_and_search_roundtrip() {
@@ -1650,7 +1581,10 @@ mod tests {
             .save("service", "ComfyUI listens on port 8188 using RTX 5090")
             .unwrap();
         store
-            .save("incident", "Fixed tailscaled DNS timeout by restarting systemd-resolved")
+            .save(
+                "incident",
+                "Fixed tailscaled DNS timeout by restarting systemd-resolved",
+            )
             .unwrap();
 
         let hits = store.search("ComfyUI 8188", 5);
@@ -1686,5 +1620,117 @@ mod tests {
             Path::new("/etc/nixos/../../etc/shadow"),
             "/home/pradeep/dotfiles"
         ));
+    }
+
+    #[test]
+    fn pi_durable_sqlite_conversation_persists_across_reopen() {
+        let db = std::env::temp_dir().join(format!(
+            "kaage_copilot_durable_test_{}.db",
+            std::process::id()
+        ));
+        let _ = fs::remove_file(&db);
+        let cancel = CancelToken::new();
+
+        let faux = Arc::new(Faux::new(FauxOptions::default()));
+        faux.set_responses(vec![FauxResponse::Message(Box::new(
+            serde_json::from_value(json!({
+                "role": "assistant",
+                "content": [{"type": "text", "text": "Kaage Copilot durable reply."}],
+                "api": "faux",
+                "provider": "faux",
+                "model": "faux-1",
+                "stopReason": "stop",
+                "timestamp": 0,
+                "usage": {
+                    "input": 10, "output": 5, "cacheRead": 0, "cacheWrite": 0, "totalTokens": 15,
+                    "cost": {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0, "total": 0}
+                }
+            }))
+            .unwrap(),
+        ))]);
+
+        let registry = Arc::new(Registry::default());
+        registry
+            .install(Extension {
+                name: "kaage-copilot".into(),
+                tools: vec![],
+                sections: vec![],
+                wraps: vec![],
+                hooks: vec![],
+                tasks: vec![],
+            })
+            .unwrap();
+
+        let harness = Harness::open(
+            Arc::new(SqliteStorage::open(&db, &Default::default()).unwrap()),
+            HarnessOptions {
+                models: faux.clone(),
+                registry: registry.clone(),
+                settings: None,
+                conversation_created: None,
+                now: None,
+                env: None,
+                on_report: None,
+            },
+        )
+        .unwrap();
+
+        let root = harness
+            .root(
+                RootOptions {
+                    agent: Some(AgentChange {
+                        model: Change::Set(ModelRef {
+                            provider: "faux".into(),
+                            model_id: "faux-1".into(),
+                        }),
+                        ..Default::default()
+                    }),
+                    init: None,
+                },
+                &cancel,
+            )
+            .unwrap();
+
+        root.submit(
+            SubmissionDraft::Input {
+                request_id: Some("kaage-test-1".into()),
+                content: UserContent::Text("check host status".into()),
+                when_busy: WhenBusy::default(),
+            },
+            &cancel,
+        )
+        .unwrap();
+        root.wait_for_idle(&cancel).unwrap();
+        harness.close(&cancel).unwrap();
+
+        // Reopen the same SQLite ledger and verify the conversation survived restart
+        let harness2 = Harness::open(
+            Arc::new(SqliteStorage::open(&db, &Default::default()).unwrap()),
+            HarnessOptions {
+                models: faux,
+                registry,
+                settings: None,
+                conversation_created: None,
+                now: None,
+                env: None,
+                on_report: None,
+            },
+        )
+        .unwrap();
+        let root2 = harness2.root(RootOptions::default(), &cancel).unwrap();
+        let ctx = root2.context(None, &cancel).unwrap();
+        let found = ctx.messages.iter().any(|m| {
+            if let Message::Assistant(a) = m {
+                a.content.iter().any(|b| match b {
+                    AssistantBlock::Text(t) => t.text.contains("Kaage Copilot durable reply."),
+                    _ => false,
+                })
+            } else {
+                false
+            }
+        });
+        assert!(found, "durable reply should persist across Harness reopen");
+        harness2.close(&cancel).unwrap();
+        let _ = fs::remove_file(&db);
     }
 }

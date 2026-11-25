@@ -21,6 +21,12 @@ let
   };
 
   cargoLockFile = ../Cargo.lock;
+  cargoLock = {
+    lockFile = cargoLockFile;
+    outputHashes = {
+      "pi-durable-0.1.0" = "sha256-7KlkMWDZVIDNIqwsYTtkDhIsFTICLpPV3QStBMAbzv8=";
+    };
+  };
   cargoLockData = builtins.fromTOML (builtins.readFile cargoLockFile);
 
   wasmBindgenPkg = lib.findFirst (p: p.name == "wasm-bindgen") (throw "wasm-bindgen not found in Cargo.lock") cargoLockData.package;
@@ -35,9 +41,7 @@ let
   kaaged = rustPlatform.buildRustPackage {
     pname = "kaaged";
     version = "0.1.0";
-    inherit src;
-
-    cargoLock.lockFile = cargoLockFile;
+    inherit src cargoLock;
 
     cargoBuildFlags = [
       "-p"
@@ -66,9 +70,7 @@ let
     version = "0.1.0";
     inherit src;
 
-    cargoDeps = rustPlatform.importCargoLock {
-      lockFile = cargoLockFile;
-    };
+    cargoDeps = rustPlatform.importCargoLock cargoLock;
 
     nativeBuildInputs = [
       rustPlatform.cargoSetupHook
@@ -119,9 +121,7 @@ let
   kaage-ui-native = rustPlatform.buildRustPackage {
     pname = "kaage-ui-native";
     version = "0.1.0";
-    inherit src;
-
-    cargoLock.lockFile = cargoLockFile;
+    inherit src cargoLock;
 
     cargoBuildFlags = [
       "-p"

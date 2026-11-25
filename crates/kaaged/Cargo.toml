@@ -21,7 +21,8 @@ sysinfo = "0.34"
 futures-util = "0.3"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-rusqlite = { version = "0.32", features = ["bundled"] }
+rusqlite = { version = "0.40", features = ["bundled", "fallible_uint"] }
+pi-durable = { git = "https://github.com/y0usaf/pi-durable-rs", rev = "460649edb63d495d97c30cc69b2481d10f2b4cca", features = ["providers"] }
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }
