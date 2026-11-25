@@ -735,8 +735,13 @@ mod wasm_overlay {
         let Some(root) = doc.get_element_by_id("kaage_dom_overlay") else {
             return;
         };
+        let (code_bg, code_fg, inline_bg, inline_fg, code_border) = if p.is_dark {
+            ("#181e27", "#f2f5fa", "#222936", "#ffd166", "#3a4659")
+        } else {
+            ("#f0f2f5", "#141820", "#e4e8ef", "#1b2838", "#b8c0cc")
+        };
         let css = format!(
-            "--kaage-bg:{};--kaage-panel:{};--kaage-well:{};--kaage-alt:{};--kaage-accent:{};--kaage-border:{};--kaage-text:{};--kaage-muted:{};--kaage-green:{};--kaage-red:{};--kaage-sky:{};",
+            "--kaage-bg:{};--kaage-panel:{};--kaage-well:{};--kaage-alt:{};--kaage-accent:{};--kaage-border:{};--kaage-text:{};--kaage-muted:{};--kaage-green:{};--kaage-red:{};--kaage-sky:{};--kaage-code-bg:{code_bg};--kaage-code-fg:{code_fg};--kaage-inline-code-bg:{inline_bg};--kaage-inline-code-fg:{inline_fg};--kaage-code-border:{code_border};",
             hex_c(p.canvas_bg),
             hex_c(p.surface),
             hex_c(p.well),
