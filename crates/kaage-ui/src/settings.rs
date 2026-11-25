@@ -4,7 +4,8 @@ use crate::theme::{
 };
 use egui::{Color32, CornerRadius, RichText, ScrollArea, Stroke, Ui};
 use kaage_proto::{
-    AppDataSnapshot, ClientMsg, CopilotOptimizations, CopilotProvider, CopilotStatus, TrustMode,
+    AppDataSnapshot, ClientMsg, CopilotOptimizations, CopilotProvider, CopilotStatus,
+    HostMemoryItem, TrustMode,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -38,6 +39,10 @@ pub struct SettingsWindow {
     pub persist_gemini_key: bool,
     pub persist_openai_key: bool,
     pub persist_anthropic_key: bool,
+    pub memory_category: String,
+    pub memory_input: String,
+    pub memory_pin: bool,
+    pub memory_search: String,
 }
 
 impl SettingsWindow {
@@ -64,6 +69,10 @@ impl SettingsWindow {
             persist_gemini_key: false,
             persist_openai_key: false,
             persist_anthropic_key: false,
+            memory_category: "system".into(),
+            memory_input: String::new(),
+            memory_pin: false,
+            memory_search: String::new(),
         }
     }
 
@@ -101,6 +110,7 @@ impl SettingsWindow {
         ui: &mut Ui,
         appdata: Option<&AppDataSnapshot>,
         copilot_status: Option<&CopilotStatus>,
+        memories: &[HostMemoryItem],
         send_msg: &mut dyn FnMut(ClientMsg),
     ) {
         let p = palette();
@@ -166,6 +176,7 @@ impl SettingsWindow {
             if be_toggle_button(ui, "Copilot (AI)", self.tab == SettingsTab::Copilot).clicked() {
                 self.tab = SettingsTab::Copilot;
                 send_msg(ClientMsg::GetCopilotStatus);
+                send_msg(ClientMsg::ListMemories { query: None });
             }
         });
         ui.separator();
@@ -177,7 +188,9 @@ impl SettingsWindow {
                 SettingsTab::Typography => render_typography_tab(ui),
                 SettingsTab::ColorTheme => render_color_theme_tab(ui),
                 SettingsTab::AppData => self.render_appdata_tab(ui, appdata, send_msg),
-                SettingsTab::Copilot => self.render_copilot_tab(ui, copilot_status, send_msg),
+                SettingsTab::Copilot => {
+                    self.render_copilot_tab(ui, copilot_status, memories, send_msg)
+                }
             });
     }
 
@@ -185,6 +198,7 @@ impl SettingsWindow {
         &mut self,
         ui: &mut Ui,
         status: Option<&CopilotStatus>,
+        memories: &[HostMemoryItem],
         send_msg: &mut dyn FnMut(ClientMsg),
     ) {
         let p = palette();
@@ -798,6 +812,132 @@ impl SettingsWindow {
         if opts_changed {
             send_msg(ClientMsg::SetCopilotOptimizations(opts));
         }
+
+        ui.add_space(10.0);
+        section_title(ui, "HOST MEMORIES (SQLITE FTS5)");
+        ui.label(
+            RichText::new(
+                "Pinned memories are always injected into every Copilot prompt; other memories are recalled automatically via FTS5 search. You can also use `/remember <fact>`, `/pin <fact>`, and `/memories` in Copilot chat.",
+            )
+            .size(11.0)
+            .color(p.text_muted),
+        );
+        ui.add_space(4.0);
+        egui::Frame::NONE
+            .fill(p.well)
+            .stroke(Stroke::new(1.0, p.border))
+            .inner_margin(8.0)
+            .show(ui, |ui| {
+                ui.set_min_width(ui.available_width());
+                ui.horizontal_wrapped(|ui| {
+                    ui.label(RichText::new("Category:").color(p.text));
+                    for cat in ["system", "service", "preference", "incident"] {
+                        if be_toggle_button(ui, cat, self.memory_category == cat).clicked() {
+                            self.memory_category = cat.to_string();
+                        }
+                    }
+                    ui.checkbox(
+                        &mut self.memory_pin,
+                        RichText::new("Pin (always active)").size(11.0).color(p.accent),
+                    );
+                });
+                ui.add_space(4.0);
+                ui.horizontal_wrapped(|ui| {
+                    let resp = ui.add(
+                        egui::TextEdit::singleline(&mut self.memory_input)
+                            .hint_text("e.g. ComfyUI listens on port 8188 using RTX 5090")
+                            .desired_width(360.0),
+                    );
+                    let enter =
+                        resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                    if (be_button(ui, "+ Remember").clicked() || enter)
+                        && !self.memory_input.trim().is_empty()
+                    {
+                        send_msg(ClientMsg::SaveMemory {
+                            category: self.memory_category.clone(),
+                            content: self.memory_input.trim().to_string(),
+                            pinned: self.memory_pin,
+                        });
+                        self.memory_input.clear();
+                    }
+                });
+
+                ui.add_space(6.0);
+                ui.separator();
+                ui.horizontal_wrapped(|ui| {
+                    ui.label(
+                        RichText::new(format!("Saved ({}):", memories.len()))
+                            .strong()
+                            .size(11.0)
+                            .color(p.text_muted),
+                    );
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.memory_search)
+                            .hint_text("Filter memories...")
+                            .desired_width(200.0),
+                    );
+                    if be_button(ui, "Refresh").clicked() {
+                        send_msg(ClientMsg::ListMemories { query: None });
+                    }
+                });
+                ui.add_space(4.0);
+
+                let needle = self.memory_search.trim().to_ascii_lowercase();
+                let mut shown = 0usize;
+                for item in memories {
+                    if !needle.is_empty()
+                        && !item.content.to_ascii_lowercase().contains(&needle)
+                        && !item.category.to_ascii_lowercase().contains(&needle)
+                    {
+                        continue;
+                    }
+                    shown += 1;
+                    ui.horizontal_wrapped(|ui| {
+                        if item.pinned {
+                            ui.label(
+                                RichText::new("📌")
+                                    .size(11.0)
+                                    .color(p.accent),
+                            );
+                        }
+                        ui.label(
+                            RichText::new(format!("[{}]", item.category))
+                                .monospace()
+                                .size(10.5)
+                                .color(p.status_sky),
+                        );
+                        ui.label(
+                            RichText::new(&item.content)
+                                .size(11.5)
+                                .color(p.text),
+                        );
+                        if be_toggle_button(
+                            ui,
+                            if item.pinned { "Pinned" } else { "Pin" },
+                            item.pinned,
+                        )
+                        .clicked()
+                        {
+                            send_msg(ClientMsg::TogglePinMemory {
+                                id: item.id,
+                                pinned: !item.pinned,
+                            });
+                        }
+                        if be_button(ui, "Delete").clicked() {
+                            send_msg(ClientMsg::DeleteMemory { id: item.id });
+                        }
+                    });
+                    ui.separator();
+                }
+                if shown == 0 {
+                    ui.label(
+                        RichText::new("No memories saved yet.")
+                            .italics()
+                            .size(11.0)
+                            .color(p.text_muted),
+                    );
+                }
+            });
     }
 
     fn render_appdata_tab(

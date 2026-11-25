@@ -1010,6 +1010,66 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
                     }
                 });
             }
+            ClientMsg::ListMemories { query } => {
+                let list = state.copilot.list_memories(query.as_deref());
+                let _ = out_tx.send(ServerMsg::MemoriesSnapshot(list));
+            }
+            ClientMsg::SaveMemory {
+                category,
+                content,
+                pinned,
+            } => match state.copilot.save_memory(&category, &content, pinned) {
+                Ok(list) => {
+                    let _ = out_tx.send(ServerMsg::MemoriesSnapshot(list));
+                    let _ = out_tx.send(ServerMsg::ActionFeedback {
+                        target: "Host Memory".into(),
+                        ok: true,
+                        message: if pinned {
+                            "Pinned memory saved".into()
+                        } else {
+                            "Memory saved".into()
+                        },
+                    });
+                }
+                Err(err) => {
+                    let _ = out_tx.send(ServerMsg::ActionFeedback {
+                        target: "Host Memory".into(),
+                        ok: false,
+                        message: err,
+                    });
+                }
+            },
+            ClientMsg::TogglePinMemory { id, pinned } => {
+                match state.copilot.toggle_pin_memory(id, pinned) {
+                    Ok(list) => {
+                        let _ = out_tx.send(ServerMsg::MemoriesSnapshot(list));
+                    }
+                    Err(err) => {
+                        let _ = out_tx.send(ServerMsg::ActionFeedback {
+                            target: "Host Memory".into(),
+                            ok: false,
+                            message: err,
+                        });
+                    }
+                }
+            }
+            ClientMsg::DeleteMemory { id } => match state.copilot.delete_memory(id) {
+                Ok(list) => {
+                    let _ = out_tx.send(ServerMsg::MemoriesSnapshot(list));
+                    let _ = out_tx.send(ServerMsg::ActionFeedback {
+                        target: "Host Memory".into(),
+                        ok: true,
+                        message: "Memory deleted".into(),
+                    });
+                }
+                Err(err) => {
+                    let _ = out_tx.send(ServerMsg::ActionFeedback {
+                        target: "Host Memory".into(),
+                        ok: false,
+                        message: err,
+                    });
+                }
+            },
             ClientMsg::GetDebugLogs => {
                 let _ = out_tx.send(ServerMsg::DebugLogsSnapshot(state.debug_log.snapshot()));
             }

@@ -1,6 +1,6 @@
 use kaage_proto::{
     CopilotCard, CopilotHistoryMessage, CopilotOptimizations, CopilotProvider, CopilotStatus,
-    LocalLlmEndpoint, NixosInfo, ServerMsg, TrustMode, VitalsQuery, VitalsWindow,
+    HostMemoryItem, LocalLlmEndpoint, NixosInfo, ServerMsg, TrustMode, VitalsQuery, VitalsWindow,
 };
 use pi_durable::ai::event_stream::AssistantMessageEventStream;
 use pi_durable::ai::http::{Request as PiHttpRequest, send as pi_http_send};
@@ -125,6 +125,9 @@ impl MemoryStore {
                 category,
                 content,
                 created_at UNINDEXED
+            );
+            CREATE TABLE IF NOT EXISTS pinned_memories (
+                memory_rowid INTEGER PRIMARY KEY
             );",
         )
         .map_err(|e| format!("FTS5 init failed: {e}"))?;
@@ -134,6 +137,20 @@ impl MemoryStore {
     }
 
     pub fn save(&self, category: &str, content: &str) -> Result<(), String> {
+        self.save_with_pin(category, content, false).map(|_| ())
+    }
+
+    pub fn save_with_pin(&self, category: &str, content: &str, pinned: bool) -> Result<i64, String> {
+        let content = content.trim();
+        if content.is_empty() {
+            return Err("Memory content cannot be empty".into());
+        }
+        let cat = match category.trim().to_ascii_lowercase().as_str() {
+            "service" => "service",
+            "preference" => "preference",
+            "incident" => "incident",
+            _ => "system",
+        };
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
@@ -141,10 +158,132 @@ impl MemoryStore {
         let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         conn.execute(
             "INSERT INTO memories_fts (category, content, created_at) VALUES (?1, ?2, ?3)",
-            params![category.trim(), content.trim(), now.to_string()],
+            params![cat, content, now.to_string()],
         )
         .map_err(|e| format!("Memory save failed: {e}"))?;
+        let id = conn.last_insert_rowid();
+        if pinned {
+            let _ = conn.execute(
+                "INSERT OR IGNORE INTO pinned_memories (memory_rowid) VALUES (?1)",
+                params![id],
+            );
+        }
+        Ok(id)
+    }
+
+    pub fn set_pinned(&self, id: i64, pinned: bool) -> Result<(), String> {
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        if pinned {
+            conn.execute(
+                "INSERT OR IGNORE INTO pinned_memories (memory_rowid) VALUES (?1)",
+                params![id],
+            )
+            .map_err(|e| format!("Pin memory failed: {e}"))?;
+        } else {
+            conn.execute(
+                "DELETE FROM pinned_memories WHERE memory_rowid = ?1",
+                params![id],
+            )
+            .map_err(|e| format!("Unpin memory failed: {e}"))?;
+        }
         Ok(())
+    }
+
+    pub fn delete(&self, id: i64) -> Result<(), String> {
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        let _ = conn.execute(
+            "DELETE FROM pinned_memories WHERE memory_rowid = ?1",
+            params![id],
+        );
+        conn.execute("DELETE FROM memories_fts WHERE rowid = ?1", params![id])
+            .map_err(|e| format!("Delete memory failed: {e}"))?;
+        Ok(())
+    }
+
+    pub fn pinned(&self, limit: usize) -> Vec<HostMemoryItem> {
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        let mut out = Vec::new();
+        if let Ok(mut stmt) = conn.prepare(
+            "SELECT m.rowid, m.category, m.content, m.created_at \
+             FROM memories_fts m \
+             INNER JOIN pinned_memories p ON p.memory_rowid = m.rowid \
+             ORDER BY m.rowid DESC LIMIT ?1",
+        ) && let Ok(rows) = stmt.query_map(params![limit as i64], |r| {
+            let created_str: String = r.get(3).unwrap_or_default();
+            Ok(HostMemoryItem {
+                id: r.get(0)?,
+                category: r.get(1)?,
+                content: r.get(2)?,
+                pinned: true,
+                created_at: created_str.parse::<i64>().unwrap_or(0),
+            })
+        }) {
+            for row in rows.flatten() {
+                out.push(row);
+            }
+        }
+        out
+    }
+
+    pub fn list(&self, query: Option<&str>, limit: usize) -> Vec<HostMemoryItem> {
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        let q = query.map(str::trim).filter(|s| !s.is_empty());
+        let mut out = Vec::new();
+
+        if let Some(q) = q {
+            let tokens: Vec<String> = q
+                .split(|c: char| !c.is_alphanumeric() && c != '_' && c != '-')
+                .filter(|t| t.len() >= 2)
+                .map(|t| format!("\"{}\"", t.replace('"', "")))
+                .collect();
+            if !tokens.is_empty() {
+                let fts_query = tokens.join(" OR ");
+                if let Ok(mut stmt) = conn.prepare(
+                    "SELECT m.rowid, m.category, m.content, m.created_at, (p.memory_rowid IS NOT NULL) AS is_pinned \
+                     FROM memories_fts m \
+                     LEFT JOIN pinned_memories p ON p.memory_rowid = m.rowid \
+                     WHERE memories_fts MATCH ?1 \
+                     ORDER BY is_pinned DESC, rank LIMIT ?2",
+                ) && let Ok(rows) = stmt.query_map(params![fts_query, limit as i64], |r| {
+                    let created_str: String = r.get(3).unwrap_or_default();
+                    let pinned_int: i64 = r.get(4).unwrap_or(0);
+                    Ok(HostMemoryItem {
+                        id: r.get(0)?,
+                        category: r.get(1)?,
+                        content: r.get(2)?,
+                        pinned: pinned_int != 0,
+                        created_at: created_str.parse::<i64>().unwrap_or(0),
+                    })
+                }) {
+                    for row in rows.flatten() {
+                        out.push(row);
+                    }
+                }
+            }
+            return out;
+        }
+
+        if let Ok(mut stmt) = conn.prepare(
+            "SELECT m.rowid, m.category, m.content, m.created_at, (p.memory_rowid IS NOT NULL) AS is_pinned \
+             FROM memories_fts m \
+             LEFT JOIN pinned_memories p ON p.memory_rowid = m.rowid \
+             ORDER BY is_pinned DESC, m.rowid DESC LIMIT ?1",
+        ) && let Ok(rows) = stmt.query_map(params![limit as i64], |r| {
+            let created_str: String = r.get(3).unwrap_or_default();
+            let pinned_int: i64 = r.get(4).unwrap_or(0);
+            Ok(HostMemoryItem {
+                id: r.get(0)?,
+                category: r.get(1)?,
+                content: r.get(2)?,
+                pinned: pinned_int != 0,
+                created_at: created_str.parse::<i64>().unwrap_or(0),
+            })
+        }) {
+            for row in rows.flatten() {
+                out.push(row);
+            }
+        }
+        out
     }
 
     pub fn search(&self, query: &str, limit: usize) -> Vec<(String, String)> {
@@ -890,6 +1029,49 @@ impl Models for KaageModels {
             let mut had_error = false;
             while let Some(event) = inner.next_event() {
                 match &event {
+                    AssistantMessageEvent::ThinkingStart { .. } => {
+                        if let Some(turn) = core
+                            .active_turn
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .clone()
+                        {
+                            let _ = turn.out_tx.send(ServerMsg::CopilotChunk {
+                                request_id: turn.request_id,
+                                delta: "<think>".to_string(),
+                                done: false,
+                            });
+                        }
+                    }
+                    AssistantMessageEvent::ThinkingDelta { delta, .. } if !delta.is_empty() => {
+                        streamed_bytes += delta.len();
+                        if let Some(turn) = core
+                            .active_turn
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .clone()
+                        {
+                            let _ = turn.out_tx.send(ServerMsg::CopilotChunk {
+                                request_id: turn.request_id,
+                                delta: delta.clone(),
+                                done: false,
+                            });
+                        }
+                    }
+                    AssistantMessageEvent::ThinkingEnd { .. } => {
+                        if let Some(turn) = core
+                            .active_turn
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .clone()
+                        {
+                            let _ = turn.out_tx.send(ServerMsg::CopilotChunk {
+                                request_id: turn.request_id,
+                                delta: "</think>\n\n".to_string(),
+                                done: false,
+                            });
+                        }
+                    }
                     AssistantMessageEvent::TextDelta { delta, .. } if !delta.is_empty() => {
                         streamed_bytes += delta.len();
                         if let Some(turn) = core
@@ -1291,6 +1473,49 @@ impl CopilotManager {
 
     pub fn status(&self) -> CopilotStatus {
         self.core.status()
+    }
+
+    pub fn list_memories(&self, query: Option<&str>) -> Vec<HostMemoryItem> {
+        self.core
+            .memory
+            .as_ref()
+            .map(|m| m.list(query, 100))
+            .unwrap_or_default()
+    }
+
+    pub fn save_memory(
+        &self,
+        category: &str,
+        content: &str,
+        pinned: bool,
+    ) -> Result<Vec<HostMemoryItem>, String> {
+        let mem = self
+            .core
+            .memory
+            .as_ref()
+            .ok_or_else(|| "Memory store unavailable".to_string())?;
+        mem.save_with_pin(category, content, pinned)?;
+        Ok(mem.list(None, 100))
+    }
+
+    pub fn toggle_pin_memory(&self, id: i64, pinned: bool) -> Result<Vec<HostMemoryItem>, String> {
+        let mem = self
+            .core
+            .memory
+            .as_ref()
+            .ok_or_else(|| "Memory store unavailable".to_string())?;
+        mem.set_pinned(id, pinned)?;
+        Ok(mem.list(None, 100))
+    }
+
+    pub fn delete_memory(&self, id: i64) -> Result<Vec<HostMemoryItem>, String> {
+        let mem = self
+            .core
+            .memory
+            .as_ref()
+            .ok_or_else(|| "Memory store unavailable".to_string())?;
+        mem.delete(id)?;
+        Ok(mem.list(None, 100))
     }
 
     pub fn set_optimizations(&self, mut opts: CopilotOptimizations) -> Result<CopilotStatus, String> {
@@ -2055,10 +2280,23 @@ impl CopilotManager {
 
             let mut recalled_block = String::new();
             if let Some(ref mem) = mgr.core.memory {
+                let pinned = mem.pinned(10);
+                let mut seen_contents: Vec<String> = Vec::new();
+                if !pinned.is_empty() {
+                    recalled_block.push_str("\nPinned host memories (always active):\n");
+                    for item in &pinned {
+                        recalled_block.push_str(&format!("- [{}] {}\n", item.category, item.content));
+                        seen_contents.push(item.content.clone());
+                    }
+                }
                 let hits = mem.search(&prompt, 5);
-                if !hits.is_empty() {
+                let extra: Vec<(String, String)> = hits
+                    .into_iter()
+                    .filter(|(_, txt)| !seen_contents.contains(txt))
+                    .collect();
+                if !extra.is_empty() {
                     recalled_block.push_str("\nRecalled host memories:\n");
-                    for (cat, txt) in &hits {
+                    for (cat, txt) in &extra {
                         recalled_block.push_str(&format!("- [{cat}] {txt}\n"));
                         let _ = out_tx.send(ServerMsg::CopilotCard {
                             request_id,
@@ -2077,7 +2315,8 @@ impl CopilotManager {
                  Active OS: {} (NixOS: {}, generation: {:?}, current-system: {:?}).\n\
                  Configured flake path: {}.\n\
                  Target node: {} · Trust mode: {}.\n\
-                 Use your diagnostic tools to inspect real host state before answering. Be concise, accurate, and cite exact unit names, metrics, and file paths.{recalled_block}",
+                 Use your diagnostic tools to inspect real host state before answering. Be concise, accurate, and cite exact unit names, metrics, and file paths. \
+                 When you learn durable host facts (port mappings, GPU/VRAM splits, user preferences, or incident fixes), save them with `save_host_memory`.{recalled_block}",
                 mgr.core.local_hostname,
                 nixos.pretty_name,
                 nixos.is_nixos,
@@ -2129,7 +2368,10 @@ impl CopilotManager {
 
                 root.submit(
                     SubmissionDraft::Input {
-                        request_id: Some(format!("kaage-{request_id}")),
+                        // Do not reuse client-local sequential `request_id`s (1, 2, 3...) as
+                        // pi-durable idempotency keys, or prompts after a browser refresh would
+                        // be silently deduplicated against prior turns in SQLite.
+                        request_id: None,
                         content: UserContent::Text(prompt),
                         when_busy: WhenBusy::default(),
                     },
@@ -2651,6 +2893,23 @@ mod tests {
         assert!(!hits.is_empty());
         assert_eq!(hits[0].0, "service");
         assert!(hits[0].1.contains("8188"));
+
+        let pinned_id = store
+            .save_with_pin("preference", "Always prefer nixos-rebuild dry-build first", true)
+            .unwrap();
+        let pinned_list = store.pinned(10);
+        assert_eq!(pinned_list.len(), 1);
+        assert_eq!(pinned_list[0].id, pinned_id);
+        assert!(pinned_list[0].pinned);
+
+        let all = store.list(None, 20);
+        assert_eq!(all.len(), 3);
+        assert!(all[0].pinned, "pinned memories should sort first");
+
+        store.set_pinned(pinned_id, false).unwrap();
+        assert!(store.pinned(10).is_empty());
+        store.delete(pinned_id).unwrap();
+        assert_eq!(store.list(None, 20).len(), 2);
 
         let _ = fs::remove_file(&db);
     }

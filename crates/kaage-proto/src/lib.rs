@@ -602,6 +602,15 @@ impl Default for CopilotOptimizations {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HostMemoryItem {
+    pub id: i64,
+    pub category: String,
+    pub content: String,
+    pub pinned: bool,
+    pub created_at: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CopilotHistoryMessage {
     pub role: String,
     pub text: String,
@@ -838,6 +847,21 @@ pub enum ClientMsg {
     },
     GetCopilotHistory,
     ClearCopilotHistory,
+    ListMemories {
+        query: Option<String>,
+    },
+    SaveMemory {
+        category: String,
+        content: String,
+        pinned: bool,
+    },
+    TogglePinMemory {
+        id: i64,
+        pinned: bool,
+    },
+    DeleteMemory {
+        id: i64,
+    },
     GetDebugLogs,
     ClearDebugLogs,
     EmitDebugLog {
@@ -914,6 +938,7 @@ pub enum ServerMsg {
         summary: String,
     },
     CopilotHistory(Vec<CopilotHistoryMessage>),
+    MemoriesSnapshot(Vec<HostMemoryItem>),
     DebugLogsSnapshot(Vec<DebugLogEntry>),
     DebugLogEntry(DebugLogEntry),
 }

@@ -19,7 +19,7 @@ use crate::vitals::{VitalsSpawnRequest, VitalsWindow};
 use egui::{Color32, CornerRadius, Id, Key, Pos2, Rect, Sense, Stroke, Vec2};
 use kaage_proto::{
     AppDataSnapshot, ClientMsg, ContainerInfo, CopilotStatus, DashboardSnapshot, DebugLogEntry,
-    NixosInfo, SystemdUnitInfo, SystemdUnitStatus,
+    HostMemoryItem, NixosInfo, SystemdUnitInfo, SystemdUnitStatus,
 };
 use std::collections::VecDeque;
 
@@ -357,6 +357,7 @@ impl BeWindowManager {
         dashboard: Option<&DashboardSnapshot>,
         appdata: Option<&AppDataSnapshot>,
         copilot_status: Option<&CopilotStatus>,
+        memories: &[HostMemoryItem],
         debug_logs: &mut VecDeque<DebugLogEntry>,
         cpu_history: &[f32],
         mem_history: &[f32],
@@ -874,7 +875,13 @@ impl BeWindowManager {
                                     help.ui(&mut child_ui);
                                 }
                                 PaneKind::Settings(settings) => {
-                                    settings.ui(&mut child_ui, appdata, copilot_status, send_msg);
+                                    settings.ui(
+                                        &mut child_ui,
+                                        appdata,
+                                        copilot_status,
+                                        memories,
+                                        send_msg,
+                                    );
                                 }
                                 PaneKind::Copilot(copilot) => {
                                     if !modal_open {

@@ -5,7 +5,8 @@ use egui::{Rect, Ui};
 #[cfg(not(target_arch = "wasm32"))]
 use egui::{CornerRadius, RichText, ScrollArea, Stroke};
 use kaage_proto::{
-    ClientMsg, CopilotCard, CopilotHistoryMessage, CopilotProvider, CopilotStatus, TrustMode,
+    ClientMsg, CopilotCard, CopilotHistoryMessage, CopilotProvider, CopilotStatus, HostMemoryItem,
+    TrustMode,
 };
 
 #[derive(Debug, Clone)]
@@ -45,13 +46,14 @@ pub struct CopilotWindow {
     pub active_request_id: Option<u64>,
     pub next_request_id: u64,
     pub dom_dirty: bool,
+    pub awaiting_memories_dump: bool,
 }
 
 impl CopilotWindow {
     pub fn new() -> Self {
         Self {
             items: vec![CopilotItem::SystemNotice(
-                "Kaage Copilot ready. Try asking \"Why is memory high?\" or use /provider, /model, /mode, /node, /status."
+                "Kaage Copilot ready. Try asking \"Why is memory high?\" or use /remember, /pin, /memories, /test, /provider, /model, /mode, /node, /status."
                     .into(),
             )],
             #[cfg(not(target_arch = "wasm32"))]
@@ -59,6 +61,7 @@ impl CopilotWindow {
             active_request_id: None,
             next_request_id: 1,
             dom_dirty: true,
+            awaiting_memories_dump: false,
         }
     }
 
@@ -75,7 +78,7 @@ impl CopilotWindow {
             if done {
                 *is_done = true;
             }
-        } else {
+        } else if !delta.is_empty() || !done {
             self.items.push(CopilotItem::Assistant {
                 request_id,
                 text: delta,
@@ -113,6 +116,24 @@ impl CopilotWindow {
             ts_ms: now_epoch_ms(),
         });
         self.dom_dirty = true;
+    }
+
+    pub fn on_memories_snapshot(&mut self, list: &[HostMemoryItem]) {
+        if !self.awaiting_memories_dump {
+            return;
+        }
+        self.awaiting_memories_dump = false;
+        let summary = if list.is_empty() {
+            "### Host Memories\n_No saved memories found. Use `/remember <fact>` or `/pin <fact>` to save one._".to_string()
+        } else {
+            let mut md = format!("### Host Memories ({})\n", list.len());
+            for item in list.iter().take(25) {
+                let pin = if item.pinned { "📌 " } else { "" };
+                md.push_str(&format!("- {pin}**[{}]** {}\n", item.category, item.content));
+            }
+            md
+        };
+        self.on_connection_test(summary);
     }
 
     pub fn load_history(&mut self, history: &[CopilotHistoryMessage]) {
@@ -258,6 +279,50 @@ impl CopilotWindow {
                         ClientMsg::TestCopilotConnection,
                     )];
                 }
+                "remember" | "pin" => {
+                    let pinned = cmd == "pin";
+                    let body = rest
+                        .strip_prefix(&cmd)
+                        .or_else(|| {
+                            let idx = rest.find(char::is_whitespace)?;
+                            Some(&rest[idx..])
+                        })
+                        .unwrap_or("")
+                        .trim();
+                    if body.is_empty() {
+                        self.items.push(CopilotItem::SystemNotice(format!(
+                            "Usage: /{cmd} [system|service|preference|incident:] <fact to remember>"
+                        )));
+                        return Vec::new();
+                    }
+                    let (category, content) = parse_memory_category(body);
+                    self.items.push(CopilotItem::Card(CopilotCard::MemoryNote {
+                        saved: true,
+                        category: if pinned {
+                            format!("{category} · pinned")
+                        } else {
+                            category.clone()
+                        },
+                        summary: content.clone(),
+                    }));
+                    return vec![CopilotCrossAction::SendClientMsg(ClientMsg::SaveMemory {
+                        category,
+                        content,
+                        pinned,
+                    })];
+                }
+                "memories" => {
+                    let q = rest
+                        .find(char::is_whitespace)
+                        .map(|idx| rest[idx..].trim().to_string())
+                        .filter(|s| !s.is_empty());
+                    self.awaiting_memories_dump = true;
+                    self.items
+                        .push(CopilotItem::SystemNotice("Loading host memories...".into()));
+                    return vec![CopilotCrossAction::SendClientMsg(ClientMsg::ListMemories {
+                        query: q,
+                    })];
+                }
                 "clear" => {
                     self.items.clear();
                     return vec![CopilotCrossAction::SendClientMsg(
@@ -266,7 +331,7 @@ impl CopilotWindow {
                 }
                 _ => {
                     self.items.push(CopilotItem::SystemNotice(
-                        "Commands: /provider <gemini|openai>, /model <id>, /mode <monitored|manage>, /node <host>, /status, /clear"
+                        "Commands: /remember <fact>, /pin <fact>, /memories [query], /test, /provider <gemini|openai|claude|local>, /model <id>, /mode <monitored|manage>, /node <host>, /status, /clear"
                             .into(),
                     ));
                     return Vec::new();
@@ -1092,6 +1157,18 @@ mod wasm_overlay {
     fn js_str(s: &str) -> String {
         s.replace('\\', "\\\\").replace('\'', "\\'")
     }
+}
+
+fn parse_memory_category(body: &str) -> (String, String) {
+    if let Some((prefix, rest)) = body.split_once(':') {
+        let p = prefix.trim().to_ascii_lowercase();
+        if matches!(p.as_str(), "system" | "service" | "preference" | "incident")
+            && !rest.trim().is_empty()
+        {
+            return (p, rest.trim().to_string());
+        }
+    }
+    ("system".to_string(), body.trim().to_string())
 }
 
 fn now_epoch_ms() -> u64 {

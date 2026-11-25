@@ -29,8 +29,8 @@ use help::HelpWindow;
 use inspectors::{InspectorSpawnRequest, ScopeFilter, StateFilter};
 use kaage_proto::{
     AppDataSnapshot, ClientMsg, ContainerInfo, CopilotHistoryMessage, CopilotStatus,
-    DashboardSnapshot, DebugLogEntry, DebugLogLevel, FileOp, HostMetrics, NixosInfo, ServerMsg,
-    SystemdUnitInfo, SystemdUnitStatus, UnitAction, VitalsTick,
+    DashboardSnapshot, DebugLogEntry, DebugLogLevel, FileOp, HostMemoryItem, HostMetrics,
+    NixosInfo, ServerMsg, SystemdUnitInfo, SystemdUnitStatus, UnitAction, VitalsTick,
 };
 use std::collections::VecDeque;
 use palette::{CommandPalette, PaletteAction};
@@ -128,6 +128,7 @@ struct KaageApp {
     appdata: Option<AppDataSnapshot>,
     copilot_status: Option<CopilotStatus>,
     copilot_history: Vec<CopilotHistoryMessage>,
+    memories: Vec<HostMemoryItem>,
     debug_logs: VecDeque<DebugLogEntry>,
     cpu_history: Vec<f32>,
     mem_history: Vec<f32>,
@@ -290,6 +291,7 @@ impl KaageApp {
             appdata: None,
             copilot_status: None,
             copilot_history: Vec::new(),
+            memories: Vec::new(),
             debug_logs: VecDeque::with_capacity(2000),
             cpu_history: Vec::with_capacity(MAX_HISTORY_SAMPLES),
             mem_history: Vec::with_capacity(MAX_HISTORY_SAMPLES),
@@ -340,6 +342,7 @@ impl KaageApp {
         self.send_client_msg(ClientMsg::GetAppDataState);
         self.send_client_msg(ClientMsg::GetCopilotStatus);
         self.send_client_msg(ClientMsg::GetCopilotHistory);
+        self.send_client_msg(ClientMsg::ListMemories { query: None });
         self.send_client_msg(ClientMsg::GetDebugLogs);
         let startup = std::mem::take(&mut self.pending_startup_msgs);
         for msg in startup {
@@ -578,6 +581,7 @@ impl KaageApp {
 
     fn open_copilot_settings(&mut self) {
         self.send_client_msg(ClientMsg::GetCopilotStatus);
+        self.send_client_msg(ClientMsg::ListMemories { query: None });
         for group in &mut self.wm.groups {
             for (idx, tab) in group.tabs.iter_mut().enumerate() {
                 if let PaneKind::Settings(settings) = &mut tab.kind {
@@ -951,6 +955,16 @@ impl eframe::App for KaageApp {
                                     }
                                 }
                             }
+                            ServerMsg::MemoriesSnapshot(list) => {
+                                self.memories = list;
+                                for g in &mut self.wm.groups {
+                                    for t in &mut g.tabs {
+                                        if let PaneKind::Copilot(c) = &mut t.kind {
+                                            c.on_memories_snapshot(&self.memories);
+                                        }
+                                    }
+                                }
+                            }
                             ServerMsg::DebugLogsSnapshot(entries) => {
                                 self.debug_logs.clear();
                                 for e in entries {
@@ -1108,6 +1122,7 @@ impl eframe::App for KaageApp {
             self.dashboard.as_ref(),
             self.appdata.as_ref(),
             self.copilot_status.as_ref(),
+            &self.memories,
             &mut self.debug_logs,
             &self.cpu_history,
             &self.mem_history,
